@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:docx_to_text/docx_to_text.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -41,7 +42,7 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
   bool _isLoading = false;
   String? _lastDir;
 
-  /// Each selected file + its decoded text.
+  /// Each selected file (we store path/name only; content is read fresh on copy).
   final List<_SelectedFile> _files = [];
 
   @override
@@ -75,7 +76,7 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
         type: FileType.any,
         dialogTitle: 'Select file(s) to copy as text',
         initialDirectory: _lastDir,
-        withData: false, // we read from disk for large files
+        withData: false,
       );
 
       if (result == null || result.files.isEmpty) return;
@@ -87,7 +88,7 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
         await _saveLastDir(parent);
       }
 
-      // Read files in the returned order.
+      // Read files in the returned order (store only their identity).
       final pickedPaths = result.files
           .map((f) => f.path)
           .whereType<String>()
@@ -98,26 +99,16 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
         final file = File(path);
         if (!file.existsSync()) continue;
 
-        final bytes = await file.readAsBytes();
-
-        // "Exact text" is tricky if files aren't UTF-8; this:
-        // - decodes UTF-8
-        // - allows malformed sequences without crashing
-        final text = utf8.decode(bytes, allowMalformed: true);
-
         loaded.add(_SelectedFile(
           path: path,
           name: file.uri.pathSegments.isNotEmpty
               ? file.uri.pathSegments.last
               : path,
-          text: text,
-          byteLength: bytes.length,
         ));
       }
 
       setState(() {
-        _files
-          ..addAll(loaded);
+        _files..addAll(loaded);
       });
     } finally {
       if (mounted) setState(() => _isLoading = false);
@@ -128,14 +119,49 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
     setState(_files.clear);
   }
 
-  String _buildClipboardText() {
+  String _extLower(String nameOrPath) {
+    final dot = nameOrPath.lastIndexOf('.');
+    if (dot == -1) return '';
+    return nameOrPath.substring(dot + 1).toLowerCase();
+  }
+
+  Future<String> _readFileAsTextSmart(_SelectedFile f) async {
+    final file = File(f.path);
+    final bytes = await file.readAsBytes();
+
+    final ext = _extLower(f.name);
+    if (ext == 'docx') {
+      // DOCX is a zip container with OOXML. Extract plain text.
+      // (Formatting is not preserved.)
+      return docxToText(bytes);
+    }
+
+    // "Exact text" is tricky if files aren't UTF-8; this:
+    // - decodes UTF-8
+    // - allows malformed sequences without crashing
+    return utf8.decode(bytes, allowMalformed: true);
+  }
+
+  /// Build text by reading each file from disk at the moment of copying.
+  Future<String> _buildClipboardText() async {
     final buffer = StringBuffer();
 
     for (var i = 0; i < _files.length; i++) {
       final f = _files[i];
 
       buffer.writeln('===== ${f.name} =====');
-      buffer.writeln(f.text);
+
+      final file = File(f.path);
+      if (!file.existsSync()) {
+        buffer.writeln('[Missing file: ${f.path}]');
+      } else {
+        try {
+          final text = await _readFileAsTextSmart(f);
+          buffer.writeln(text);
+        } catch (e) {
+          buffer.writeln('[Failed to read ${f.path}: $e]');
+        }
+      }
 
       // Separate files with a blank line (but don't add trailing whitespace spam)
       if (i != _files.length - 1) buffer.writeln('\n');
@@ -147,7 +173,7 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
   Future<void> _copyToClipboard() async {
     if (_files.isEmpty) return;
 
-    final text = _buildClipboardText();
+    final text = await _buildClipboardText();
     await Clipboard.setData(ClipboardData(text: text));
 
     if (!mounted) return;
@@ -161,7 +187,11 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
 
   @override
   Widget build(BuildContext context) {
-    final totalBytes = _files.fold<int>(0, (sum, f) => sum + f.byteLength);
+    final totalBytes = _files.fold<int>(0, (sum, f) {
+      final file = File(f.path);
+      if (!file.existsSync()) return sum;
+      return sum + file.lengthSync();
+    });
 
     return Scaffold(
       appBar: AppBar(
@@ -187,7 +217,6 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
               onCopy: _files.isEmpty ? null : _copyToClipboard,
             ),
             const SizedBox(height: 16),
-
             Expanded(
               child: _files.isEmpty
                   ? _EmptyState(onPick: _isLoading ? null : _pickFiles)
@@ -330,19 +359,18 @@ class _FileList extends StatelessWidget {
         separatorBuilder: (_, __) => const Divider(height: 1),
         itemBuilder: (context, i) {
           final f = files[i];
-          final preview = f.text.length <= 400 ? f.text : f.text.substring(0, 400);
+          final file = File(f.path);
+          final exists = file.existsSync();
+          final bytes = exists ? file.lengthSync() : 0;
 
           return ListTile(
             leading: const Icon(Icons.insert_drive_file_outlined),
             title: Text(f.name),
             subtitle: Text(
-              '${f.path}\n'
-                  'Chars: ${f.text.length} • Bytes: ${f.byteLength}\n'
-                  'Preview:\n$preview',
-              maxLines: 6,
+              '${f.path}\n${exists ? "Bytes: $bytes" : "Missing file"}',
+              maxLines: 3,
               overflow: TextOverflow.ellipsis,
             ),
-            isThreeLine: true,
           );
         },
       ),
@@ -354,12 +382,8 @@ class _SelectedFile {
   _SelectedFile({
     required this.path,
     required this.name,
-    required this.text,
-    required this.byteLength,
   });
 
   final String path;
   final String name;
-  final String text;
-  final int byteLength;
 }
