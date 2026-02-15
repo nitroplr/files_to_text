@@ -1,6 +1,6 @@
 #define AppName "Files to Text"
 #define AppVersion "1.0.0"
-#define AppPublisher "Your Name or Org"
+#define AppPublisher "RaidBuilder"
 #define AppExeName "files_to_text.exe"
 
 [Setup]
