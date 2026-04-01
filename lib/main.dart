@@ -318,12 +318,48 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
     return chunks;
   }
 
+  String _buildChunkPreamble({
+    required int chunkIndex,
+    required int totalChunks,
+  }) {
+    final isFinalChunk = chunkIndex == totalChunks - 1;
+
+    if (isFinalChunk) {
+      return '''
+CHATGPT INPUT INSTRUCTIONS:
+- This is chunk ${chunkIndex + 1} of $totalChunks.
+- This is the final chunk.
+- Treat this chunk together with all prior chunks in the set as one unified project, codebase, or document set.
+- Preserve cross-file and cross-chunk relationships.
+- My actual request/question will appear after this chunk in the same message.
+- Wait to answer until after reading the request/question that follows this chunk.
+
+''';
+    }
+
+    return '''
+CHATGPT INPUT INSTRUCTIONS:
+- This is chunk ${chunkIndex + 1} of $totalChunks.
+- More chunks will be sent after this one.
+- Treat this chunk together with all later chunks as one unified project, codebase, or document set.
+- Preserve cross-file and cross-chunk relationships.
+- Do not answer yet.
+- Wait for the remaining chunks and my final request.
+
+''';
+  }
+
   String _renderChunkText({
     required _ChunkPlan chunk,
     required int chunkIndex,
     required int totalChunks,
   }) {
     final buffer = StringBuffer();
+    buffer.write(_buildChunkPreamble(
+      chunkIndex: chunkIndex,
+      totalChunks: totalChunks,
+    ));
+
     buffer.writeln('===== CHUNK ${chunkIndex + 1}/$totalChunks =====');
     buffer.writeln();
 
@@ -417,10 +453,17 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
               final chunk = _lastBuiltChunks[index];
               final charCount = chunk.totalChars;
               final fileCount = chunk.sections.length;
+              final isFinalChunk = index == _lastBuiltChunks.length - 1;
 
               return ListTile(
-                leading: const Icon(Icons.content_copy),
-                title: Text('Chunk ${index + 1} of ${_lastBuiltChunks.length}'),
+                leading: Icon(
+                  isFinalChunk ? Icons.flag_outlined : Icons.content_copy,
+                ),
+                title: Text(
+                  isFinalChunk
+                      ? 'Chunk ${index + 1} of ${_lastBuiltChunks.length} (final)'
+                      : 'Chunk ${index + 1} of ${_lastBuiltChunks.length}',
+                ),
                 subtitle: Text('$fileCount file(s) • $charCount chars'),
                 onTap: () async {
                   Navigator.of(context).pop();
