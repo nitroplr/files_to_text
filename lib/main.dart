@@ -55,7 +55,6 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
     final prefs = await SharedPreferences.getInstance();
     final dir = prefs.getString(_prefsLastDirKey);
 
-    // If it no longer exists, ignore it.
     if (dir != null && Directory(dir).existsSync()) {
       setState(() => _lastDir = dir);
     }
@@ -81,38 +80,81 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
 
       if (result == null || result.files.isEmpty) return;
 
-      // Update last directory based on first picked file.
       final firstPath = result.files.first.path;
       if (firstPath != null) {
         final parent = File(firstPath).parent.path;
         await _saveLastDir(parent);
       }
 
-      // Read files in the returned order (store only their identity).
       final pickedPaths = result.files
           .map((f) => f.path)
           .whereType<String>()
           .toList(growable: false);
 
-      final loaded = <_SelectedFile>[];
-      for (final path in pickedPaths) {
-        final file = File(path);
-        if (!file.existsSync()) continue;
-
-        loaded.add(_SelectedFile(
-          path: path,
-          name: file.uri.pathSegments.isNotEmpty
-              ? file.uri.pathSegments.last
-              : path,
-        ));
-      }
-
-      setState(() {
-        _files..addAll(loaded);
-      });
+      _addPaths(pickedPaths);
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
+  }
+
+  Future<void> _pickFolder() async {
+    setState(() => _isLoading = true);
+
+    try {
+      final selectedDir = await FilePicker.platform.getDirectoryPath(
+        dialogTitle: 'Select folder to include recursively',
+        initialDirectory: _lastDir,
+      );
+
+      if (selectedDir == null || selectedDir.isEmpty) return;
+
+      await _saveLastDir(selectedDir);
+
+      final root = Directory(selectedDir);
+      if (!root.existsSync()) return;
+
+      final nestedFiles = root
+          .listSync(recursive: true, followLinks: false)
+          .whereType<File>()
+          .map((f) => f.path)
+          .toList();
+
+      _addPaths(nestedFiles);
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  void _addPaths(List<String> paths) {
+    final existingPaths = _files.map((f) => f.path).toSet();
+    final loaded = <_SelectedFile>[];
+
+    for (final path in paths) {
+      if (existingPaths.contains(path)) continue;
+
+      final file = File(path);
+      if (!file.existsSync()) continue;
+
+      loaded.add(_SelectedFile(
+        path: path,
+        name: file.uri.pathSegments.isNotEmpty
+            ? file.uri.pathSegments.last
+            : path,
+      ));
+      existingPaths.add(path);
+    }
+
+    if (loaded.isEmpty) return;
+
+    setState(() {
+      _files.addAll(loaded);
+    });
+  }
+
+  void _removeFileAt(int index) {
+    setState(() {
+      _files.removeAt(index);
+    });
   }
 
   void _clear() {
@@ -131,14 +173,9 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
 
     final ext = _extLower(f.name);
     if (ext == 'docx') {
-      // DOCX is a zip container with OOXML. Extract plain text.
-      // (Formatting is not preserved.)
       return docxToText(bytes);
     }
 
-    // "Exact text" is tricky if files aren't UTF-8; this:
-    // - decodes UTF-8
-    // - allows malformed sequences without crashing
     return utf8.decode(bytes, allowMalformed: true);
   }
 
@@ -149,7 +186,7 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
     for (var i = 0; i < _files.length; i++) {
       final f = _files[i];
 
-      buffer.writeln('===== ${f.name} =====');
+      buffer.writeln('===== ${f.path} =====');
 
       final file = File(f.path);
       if (!file.existsSync()) {
@@ -163,8 +200,10 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
         }
       }
 
-      // Separate files with a blank line (but don't add trailing whitespace spam)
-      if (i != _files.length - 1) buffer.writeln('\n');
+      if (i != _files.length - 1) {
+        buffer.writeln();
+        buffer.writeln();
+      }
     }
 
     return buffer.toString();
@@ -214,13 +253,20 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
               fileCount: _files.length,
               totalBytes: totalBytes,
               onPickFiles: _isLoading ? null : _pickFiles,
+              onPickFolder: _isLoading ? null : _pickFolder,
               onCopy: _files.isEmpty ? null : _copyToClipboard,
             ),
             const SizedBox(height: 16),
             Expanded(
               child: _files.isEmpty
-                  ? _EmptyState(onPick: _isLoading ? null : _pickFiles)
-                  : _FileList(files: _files),
+                  ? _EmptyState(
+                onPickFiles: _isLoading ? null : _pickFiles,
+                onPickFolder: _isLoading ? null : _pickFolder,
+              )
+                  : _FileList(
+                files: _files,
+                onRemoveAt: _removeFileAt,
+              ),
             ),
           ],
         ),
@@ -236,6 +282,7 @@ class _TopBar extends StatelessWidget {
     required this.fileCount,
     required this.totalBytes,
     required this.onPickFiles,
+    required this.onPickFolder,
     required this.onCopy,
   });
 
@@ -244,6 +291,7 @@ class _TopBar extends StatelessWidget {
   final int fileCount;
   final int totalBytes;
   final VoidCallback? onPickFiles;
+  final VoidCallback? onPickFolder;
   final VoidCallback? onCopy;
 
   String _formatBytes(int bytes) {
@@ -271,8 +319,14 @@ class _TopBar extends StatelessWidget {
                 height: 18,
                 child: CircularProgressIndicator(strokeWidth: 2),
               )
-                  : const Icon(Icons.folder_open),
+                  : const Icon(Icons.insert_drive_file_outlined),
               label: Text(isLoading ? 'Loading…' : 'Select files'),
+            ),
+            const SizedBox(width: 12),
+            FilledButton.tonalIcon(
+              onPressed: onPickFolder,
+              icon: const Icon(Icons.folder_open),
+              label: const Text('Select folder'),
             ),
             const SizedBox(width: 12),
             OutlinedButton.icon(
@@ -309,9 +363,13 @@ class _TopBar extends StatelessWidget {
 }
 
 class _EmptyState extends StatelessWidget {
-  const _EmptyState({required this.onPick});
+  const _EmptyState({
+    required this.onPickFiles,
+    required this.onPickFolder,
+  });
 
-  final VoidCallback? onPick;
+  final VoidCallback? onPickFiles;
+  final VoidCallback? onPickFolder;
 
   @override
   Widget build(BuildContext context) {
@@ -327,15 +385,27 @@ class _EmptyState extends StatelessWidget {
                 const Icon(Icons.description_outlined, size: 48),
                 const SizedBox(height: 12),
                 Text(
-                  'Select one or more files, then copy them as labeled text for pasting into ChatGPT.',
+                  'Select one or more files, or select a folder to include all nested files recursively, then copy them as labeled text for pasting into ChatGPT.',
                   textAlign: TextAlign.center,
                   style: Theme.of(context).textTheme.bodyLarge,
                 ),
                 const SizedBox(height: 16),
-                FilledButton.icon(
-                  onPressed: onPick,
-                  icon: const Icon(Icons.folder_open),
-                  label: const Text('Select files'),
+                Wrap(
+                  spacing: 12,
+                  runSpacing: 12,
+                  alignment: WrapAlignment.center,
+                  children: [
+                    FilledButton.icon(
+                      onPressed: onPickFiles,
+                      icon: const Icon(Icons.insert_drive_file_outlined),
+                      label: const Text('Select files'),
+                    ),
+                    FilledButton.tonalIcon(
+                      onPressed: onPickFolder,
+                      icon: const Icon(Icons.folder_open),
+                      label: const Text('Select folder'),
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -347,9 +417,13 @@ class _EmptyState extends StatelessWidget {
 }
 
 class _FileList extends StatelessWidget {
-  const _FileList({required this.files});
+  const _FileList({
+    required this.files,
+    required this.onRemoveAt,
+  });
 
   final List<_SelectedFile> files;
+  final void Function(int index) onRemoveAt;
 
   @override
   Widget build(BuildContext context) {
@@ -365,11 +439,20 @@ class _FileList extends StatelessWidget {
 
           return ListTile(
             leading: const Icon(Icons.insert_drive_file_outlined),
-            title: Text(f.name),
+            title: Text(
+              f.path,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
             subtitle: Text(
-              '${f.path}\n${exists ? "Bytes: $bytes" : "Missing file"}',
+              '${f.name}\n${exists ? "Bytes: $bytes" : "Missing file"}',
               maxLines: 3,
               overflow: TextOverflow.ellipsis,
+            ),
+            trailing: IconButton(
+              tooltip: 'Remove from selection',
+              onPressed: () => onRemoveAt(i),
+              icon: const Icon(Icons.delete_outline),
             ),
           );
         },
