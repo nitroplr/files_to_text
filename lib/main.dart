@@ -29,6 +29,46 @@ class FilesToTextApp extends StatelessWidget {
   }
 }
 
+enum _FirstHeaderMode {
+  none,
+  lightweight,
+  strictContext,
+  debugging,
+  architecture,
+  refactor,
+  ultraStrict,
+}
+
+extension _FirstHeaderModeX on _FirstHeaderMode {
+  String get prefsValue => name;
+
+  String get label {
+    switch (this) {
+      case _FirstHeaderMode.none:
+        return 'None';
+      case _FirstHeaderMode.lightweight:
+        return 'Lightweight';
+      case _FirstHeaderMode.strictContext:
+        return 'Strict context';
+      case _FirstHeaderMode.debugging:
+        return 'Debugging';
+      case _FirstHeaderMode.architecture:
+        return 'Architecture / review';
+      case _FirstHeaderMode.refactor:
+        return 'Safe refactor';
+      case _FirstHeaderMode.ultraStrict:
+        return 'Ultra strict';
+    }
+  }
+
+  static _FirstHeaderMode fromPrefs(String? value) {
+    for (final mode in _FirstHeaderMode.values) {
+      if (mode.prefsValue == value) return mode;
+    }
+    return _FirstHeaderMode.strictContext;
+  }
+}
+
 class FilesToTextPage extends StatefulWidget {
   const FilesToTextPage({super.key});
 
@@ -39,6 +79,7 @@ class FilesToTextPage extends StatefulWidget {
 class _FilesToTextPageState extends State<FilesToTextPage> {
   static const String _prefsLastDirKey = 'last_dir';
   static const String _prefsChunkSizeKey = 'chunk_size_chars';
+  static const String _prefsFirstHeaderModeKey = 'first_header_mode';
 
   static const int _defaultChunkSize = 120000;
 
@@ -51,6 +92,8 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
   final List<_SelectedFile> _files = [];
 
   List<_ChunkPlan> _lastBuiltChunks = [];
+
+  _FirstHeaderMode _firstHeaderMode = _FirstHeaderMode.strictContext;
 
   bool get _needsChunking => _lastBuiltChunks.length > 1;
 
@@ -70,6 +113,7 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
     final prefs = await SharedPreferences.getInstance();
     final dir = prefs.getString(_prefsLastDirKey);
     final chunkSize = prefs.getInt(_prefsChunkSizeKey) ?? _defaultChunkSize;
+    final firstHeaderModeValue = prefs.getString(_prefsFirstHeaderModeKey);
 
     if (!mounted) return;
 
@@ -78,6 +122,7 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
         _lastDir = dir;
       }
       _chunkSizeController.text = chunkSize.toString();
+      _firstHeaderMode = _FirstHeaderModeX.fromPrefs(firstHeaderModeValue);
     });
   }
 
@@ -91,6 +136,11 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
   Future<void> _saveChunkSize(int size) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(_prefsChunkSizeKey, size);
+  }
+
+  Future<void> _saveFirstHeaderMode(_FirstHeaderMode mode) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_prefsFirstHeaderModeKey, mode.prefsValue);
   }
 
   int get _chunkSize {
@@ -222,6 +272,22 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
     await _ensureChunksBuilt();
   }
 
+  Future<void> _onFirstHeaderModeChanged(_FirstHeaderMode? mode) async {
+    if (mode == null) return;
+
+    await _saveFirstHeaderMode(mode);
+
+    if (!mounted) return;
+    setState(() {
+      _firstHeaderMode = mode;
+      _invalidateChunks();
+    });
+
+    if (_files.isNotEmpty) {
+      await _ensureChunksBuilt();
+    }
+  }
+
   String _extLower(String nameOrPath) {
     final dot = nameOrPath.lastIndexOf('.');
     if (dot == -1) return '';
@@ -240,8 +306,142 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
     return utf8.decode(bytes, allowMalformed: true);
   }
 
-  Future<String> _buildSingleFileSection(_SelectedFile f) async {
+  String _buildFirstFileHeader({
+    required int totalFiles,
+    required bool isChunkedOutput,
+  }) {
+    if (_firstHeaderMode == _FirstHeaderMode.none) {
+      return '';
+    }
+
+    final sourceContext = totalFiles <= 1
+        ? 'The pasted content starts with a single provided file.'
+        : 'The pasted content starts with the first file from a selected set of $totalFiles files.';
+
+    final scopeContext = isChunkedOutput
+        ? 'Use this header only as analysis guidance. The chunk instructions above control chunk flow, waiting behavior, and how to treat multiple chunks together.'
+        : 'Apply these instructions to the pasted content in this message.';
+
+    switch (_firstHeaderMode) {
+      case _FirstHeaderMode.none:
+        return '';
+      case _FirstHeaderMode.lightweight:
+        return '''
+CHATGPT FIRST-FILE HEADER:
+$sourceContext
+$scopeContext
+
+Only use the provided content.
+Do not assume missing context.
+If important context is missing, say what is needed instead of guessing.
+
+''';
+      case _FirstHeaderMode.strictContext:
+        return '''
+CHATGPT FIRST-FILE HEADER:
+$sourceContext
+$scopeContext
+
+Analyze only the provided content.
+Do NOT assume missing files, functions, dependencies, or behavior.
+If required context is missing, explicitly state what is missing.
+Do NOT guess or fabricate implementations.
+
+When answering, be precise and grounded in the provided content.
+Reference specific parts of the content when possible.
+
+''';
+      case _FirstHeaderMode.debugging:
+        return '''
+CHATGPT FIRST-FILE HEADER:
+$sourceContext
+$scopeContext
+
+Use a debugging-focused analysis style.
+
+Rules:
+- Only use the provided content.
+- Do NOT assume hidden logic, missing dependencies, or unseen implementations.
+- If the issue cannot be determined from the provided content alone, explain what additional context is required.
+
+Focus on:
+- Likely causes within the provided content
+- Edge cases
+- Incorrect assumptions in the logic
+
+''';
+      case _FirstHeaderMode.architecture:
+        return '''
+CHATGPT FIRST-FILE HEADER:
+$sourceContext
+$scopeContext
+
+Use an architecture/review-focused analysis style.
+
+Constraints:
+- Only evaluate what is present.
+- Do NOT assume missing files or systems.
+- If something appears incomplete, call it out explicitly.
+
+Focus on:
+- Structure and organization
+- Maintainability
+- Potential risks or scalability concerns
+
+''';
+      case _FirstHeaderMode.refactor:
+        return '''
+CHATGPT FIRST-FILE HEADER:
+$sourceContext
+$scopeContext
+
+Use a safe-refactor analysis style.
+
+Rules:
+- Only modify or evaluate what is shown.
+- Do NOT introduce dependencies on unseen code.
+- If a better solution requires additional context, explain what is needed instead of guessing.
+
+Goal:
+- Improve clarity, safety, and correctness
+- Keep behavior consistent unless explicitly told otherwise
+
+''';
+      case _FirstHeaderMode.ultraStrict:
+        return '''
+CHATGPT FIRST-FILE HEADER:
+$sourceContext
+$scopeContext
+
+STRICT MODE:
+
+- Use ONLY the provided content.
+- ZERO assumptions about missing files or behavior.
+- If anything necessary is unclear or missing, stop and list what is needed.
+- If the question cannot be fully answered from the provided content, respond with "Insufficient context" and explain why.
+
+Do not speculate.
+Do not infer unseen implementations.
+
+''';
+    }
+  }
+
+  Future<String> _buildSingleFileSection(
+      _SelectedFile f, {
+        required bool includeFirstHeader,
+        required int totalFiles,
+        required bool isChunkedOutput,
+      }) async {
     final buffer = StringBuffer();
+
+    if (includeFirstHeader) {
+      buffer.write(_buildFirstFileHeader(
+        totalFiles: totalFiles,
+        isChunkedOutput: isChunkedOutput,
+      ));
+    }
+
     buffer.writeln('===== ${f.path} =====');
 
     final file = File(f.path);
@@ -262,9 +462,15 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
 
   Future<String> _buildClipboardText() async {
     final buffer = StringBuffer();
+    final totalFiles = _files.length;
 
     for (var i = 0; i < _files.length; i++) {
-      final section = await _buildSingleFileSection(_files[i]);
+      final section = await _buildSingleFileSection(
+        _files[i],
+        includeFirstHeader: i == 0,
+        totalFiles: totalFiles,
+        isChunkedOutput: false,
+      );
       buffer.write(section);
 
       if (i != _files.length - 1) {
@@ -281,8 +487,16 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
     await _saveChunkSize(chunkSize);
 
     final sections = <_BuiltSection>[];
-    for (final f in _files) {
-      final text = await _buildSingleFileSection(f);
+    final totalFiles = _files.length;
+
+    for (var i = 0; i < _files.length; i++) {
+      final f = _files[i];
+      final text = await _buildSingleFileSection(
+        f,
+        includeFirstHeader: i == 0,
+        totalFiles: totalFiles,
+        isChunkedOutput: true,
+      );
       sections.add(_BuiltSection(file: f, text: text));
     }
 
@@ -517,7 +731,9 @@ CHATGPT INPUT INSTRUCTIONS:
               chunkSizeController: _chunkSizeController,
               chunkStatus: chunkStatus,
               hasChunkSource: _needsChunking,
+              firstHeaderMode: _firstHeaderMode,
               onChunkSizeChanged: _onChunkSizeChanged,
+              onFirstHeaderModeChanged: _onFirstHeaderModeChanged,
               onPickFiles: _isLoading ? null : _pickFiles,
               onPickFolder: _isLoading ? null : _pickFolder,
               onCopy: _files.isEmpty ? null : _copyToClipboard,
@@ -555,7 +771,9 @@ class _TopBar extends StatelessWidget {
     required this.chunkSizeController,
     required this.chunkStatus,
     required this.hasChunkSource,
+    required this.firstHeaderMode,
     required this.onChunkSizeChanged,
+    required this.onFirstHeaderModeChanged,
     required this.onPickFiles,
     required this.onPickFolder,
     required this.onCopy,
@@ -570,7 +788,9 @@ class _TopBar extends StatelessWidget {
   final TextEditingController chunkSizeController;
   final String chunkStatus;
   final bool hasChunkSource;
+  final _FirstHeaderMode firstHeaderMode;
   final ValueChanged<String> onChunkSizeChanged;
+  final ValueChanged<_FirstHeaderMode?> onFirstHeaderModeChanged;
   final VoidCallback? onPickFiles;
   final VoidCallback? onPickFolder;
   final VoidCallback? onCopy;
@@ -634,7 +854,10 @@ class _TopBar extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 12),
-            Row(
+            Wrap(
+              spacing: 16,
+              runSpacing: 12,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
                 SizedBox(
                   width: 180,
@@ -649,8 +872,26 @@ class _TopBar extends StatelessWidget {
                     onChanged: onChunkSizeChanged,
                   ),
                 ),
-                const SizedBox(width: 16),
-                Expanded(
+                SizedBox(
+                  width: 270,
+                  child: DropdownButtonFormField<_FirstHeaderMode>(
+                    initialValue: firstHeaderMode,
+                    decoration: const InputDecoration(
+                      labelText: 'First header mode',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                    items: _FirstHeaderMode.values.map((mode) {
+                      return DropdownMenuItem<_FirstHeaderMode>(
+                        value: mode,
+                        child: Text(mode.label),
+                      );
+                    }).toList(growable: false),
+                    onChanged: onFirstHeaderModeChanged,
+                  ),
+                ),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(minWidth: 240, maxWidth: 700),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
