@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -100,7 +101,7 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
   @override
   void initState() {
     super.initState();
-    _loadPrefs();
+    unawaited(_loadPrefs());
   }
 
   @override
@@ -109,38 +110,114 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
     super.dispose();
   }
 
-  Future<void> _loadPrefs() async {
-    final prefs = await SharedPreferences.getInstance();
-    final dir = prefs.getString(_prefsLastDirKey);
-    final chunkSize = prefs.getInt(_prefsChunkSizeKey) ?? _defaultChunkSize;
-    final firstHeaderModeValue = prefs.getString(_prefsFirstHeaderModeKey);
-
+  void _showSnackBar(String message) {
     if (!mounted) return;
 
-    setState(() {
-      if (dir != null && Directory(dir).existsSync()) {
-        _lastDir = dir;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        duration: const Duration(seconds: 3),
+      ),
+    );
+  }
+
+  bool _safeFileExists(String path) {
+    try {
+      return File(path).existsSync();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  bool _safeDirectoryExists(String path) {
+    try {
+      return Directory(path).existsSync();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  int _safeFileLength(String path) {
+    try {
+      final file = File(path);
+      if (!file.existsSync()) return 0;
+      return file.lengthSync();
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  String _safeFileName(String path) {
+    try {
+      final segments = File(path).uri.pathSegments;
+      if (segments.isNotEmpty) {
+        return segments.last;
       }
-      _chunkSizeController.text = chunkSize.toString();
-      _firstHeaderMode = _FirstHeaderModeX.fromPrefs(firstHeaderModeValue);
-    });
+    } catch (_) {
+      // Fall through to path-based fallback.
+    }
+
+    final normalized = path.replaceAll('\\', '/');
+    final index = normalized.lastIndexOf('/');
+    if (index == -1 || index == normalized.length - 1) {
+      return path;
+    }
+    return normalized.substring(index + 1);
+  }
+
+  Future<void> _loadPrefs() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final dir = prefs.getString(_prefsLastDirKey);
+      final chunkSize = prefs.getInt(_prefsChunkSizeKey) ?? _defaultChunkSize;
+      final firstHeaderModeValue = prefs.getString(_prefsFirstHeaderModeKey);
+
+      if (!mounted) return;
+
+      setState(() {
+        if (dir != null && _safeDirectoryExists(dir)) {
+          _lastDir = dir;
+        }
+        _chunkSizeController.text = chunkSize.toString();
+        _firstHeaderMode = _FirstHeaderModeX.fromPrefs(firstHeaderModeValue);
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _chunkSizeController.text = _defaultChunkSize.toString();
+        _firstHeaderMode = _FirstHeaderMode.strictContext;
+      });
+      _showSnackBar('Failed to load preferences: $e');
+    }
   }
 
   Future<void> _saveLastDir(String dir) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_prefsLastDirKey, dir);
-    if (!mounted) return;
-    setState(() => _lastDir = dir);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_prefsLastDirKey, dir);
+      if (!mounted) return;
+      setState(() => _lastDir = dir);
+    } catch (e) {
+      _showSnackBar('Failed to save last folder: $e');
+    }
   }
 
   Future<void> _saveChunkSize(int size) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt(_prefsChunkSizeKey, size);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt(_prefsChunkSizeKey, size);
+    } catch (e) {
+      _showSnackBar('Failed to save chunk size: $e');
+    }
   }
 
   Future<void> _saveFirstHeaderMode(_FirstHeaderMode mode) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_prefsFirstHeaderModeKey, mode.prefsValue);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_prefsFirstHeaderModeKey, mode.prefsValue);
+    } catch (e) {
+      _showSnackBar('Failed to save first header mode: $e');
+    }
   }
 
   int get _chunkSize {
@@ -165,8 +242,12 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
 
       final firstPath = result.files.first.path;
       if (firstPath != null) {
-        final parent = File(firstPath).parent.path;
-        await _saveLastDir(parent);
+        try {
+          final parent = File(firstPath).parent.path;
+          await _saveLastDir(parent);
+        } catch (_) {
+          // Do not fail the whole pick operation if parent resolution fails.
+        }
       }
 
       final pickedPaths = result.files
@@ -175,9 +256,28 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
           .toList(growable: false);
 
       await _addPaths(pickedPaths);
+    } catch (e) {
+      _showSnackBar('Failed to select files: $e');
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
+  }
+
+  Future<List<String>> _listNestedFiles(String selectedDir) async {
+    final nestedFiles = <String>[];
+    final root = Directory(selectedDir);
+
+    await for (final entity in root.list(recursive: true, followLinks: false)) {
+      if (entity is File) {
+        try {
+          nestedFiles.add(entity.path);
+        } catch (_) {
+          // Skip any path that throws while being accessed.
+        }
+      }
+    }
+
+    return nestedFiles;
   }
 
   Future<void> _pickFolder() async {
@@ -193,51 +293,51 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
 
       await _saveLastDir(selectedDir);
 
-      final root = Directory(selectedDir);
-      if (!root.existsSync()) return;
+      if (!_safeDirectoryExists(selectedDir)) return;
 
-      final nestedFiles = root
-          .listSync(recursive: true, followLinks: false)
-          .whereType<File>()
-          .map((f) => f.path)
-          .toList();
-
+      final nestedFiles = await _listNestedFiles(selectedDir);
       await _addPaths(nestedFiles);
+    } catch (e) {
+      _showSnackBar('Failed to select folder: $e');
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
   }
 
   Future<void> _addPaths(List<String> paths) async {
-    final existingPaths = _files.map((f) => f.path).toSet();
-    final loaded = <_SelectedFile>[];
+    try {
+      final existingPaths = _files.map((f) => f.path).toSet();
+      final loaded = <_SelectedFile>[];
 
-    for (final path in paths) {
-      if (existingPaths.contains(path)) continue;
+      for (final path in paths) {
+        if (existingPaths.contains(path)) continue;
+        if (!_safeFileExists(path)) continue;
 
-      final file = File(path);
-      if (!file.existsSync()) continue;
+        loaded.add(
+          _SelectedFile(
+            path: path,
+            name: _safeFileName(path),
+          ),
+        );
+        existingPaths.add(path);
+      }
 
-      loaded.add(_SelectedFile(
-        path: path,
-        name: file.uri.pathSegments.isNotEmpty
-            ? file.uri.pathSegments.last
-            : path,
-      ));
-      existingPaths.add(path);
+      if (loaded.isEmpty) return;
+
+      setState(() {
+        _files.addAll(loaded);
+        _invalidateChunks();
+      });
+
+      await _ensureChunksBuilt();
+    } catch (e) {
+      _showSnackBar('Failed while adding selected files: $e');
     }
-
-    if (loaded.isEmpty) return;
-
-    setState(() {
-      _files.addAll(loaded);
-      _invalidateChunks();
-    });
-
-    await _ensureChunksBuilt();
   }
 
   Future<void> _removeFileAt(int index) async {
+    if (index < 0 || index >= _files.length) return;
+
     setState(() {
       _files.removeAt(index);
       _invalidateChunks();
@@ -444,8 +544,7 @@ Do not infer unseen implementations.
 
     buffer.writeln('===== ${f.path} =====');
 
-    final file = File(f.path);
-    if (!file.existsSync()) {
+    if (!_safeFileExists(f.path)) {
       buffer.writeln('[Missing file: ${f.path}]');
       return buffer.toString();
     }
@@ -591,21 +690,24 @@ CHATGPT INPUT INSTRUCTIONS:
   Future<void> _copyToClipboard() async {
     if (_files.isEmpty) return;
 
-    final text = await _buildClipboardText();
-    await Clipboard.setData(ClipboardData(text: text));
+    try {
+      final text = await _buildClipboardText();
+      await Clipboard.setData(ClipboardData(text: text));
 
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Copied ${_files.length} file(s) to clipboard'),
-        duration: const Duration(seconds: 2),
-      ),
-    );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Copied ${_files.length} file(s) to clipboard'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    } catch (e) {
+      _showSnackBar('Failed to copy files: $e');
+    }
   }
 
   Future<void> _ensureChunksBuilt() async {
     if (_files.isEmpty) return;
-
     if (_lastBuiltChunks.isNotEmpty) return;
 
     setState(() => _isChunking = true);
@@ -615,6 +717,8 @@ CHATGPT INPUT INSTRUCTIONS:
       setState(() {
         _lastBuiltChunks = chunks;
       });
+    } catch (e) {
+      _showSnackBar('Failed to build chunks: $e');
     } finally {
       if (mounted) {
         setState(() => _isChunking = false);
@@ -625,78 +729,84 @@ CHATGPT INPUT INSTRUCTIONS:
   Future<void> _copyChunk(int chunkIndex) async {
     if (_files.isEmpty) return;
 
-    await _ensureChunksBuilt();
-    if (_lastBuiltChunks.isEmpty) return;
-    if (chunkIndex < 0 || chunkIndex >= _lastBuiltChunks.length) return;
+    try {
+      await _ensureChunksBuilt();
+      if (_lastBuiltChunks.isEmpty) return;
+      if (chunkIndex < 0 || chunkIndex >= _lastBuiltChunks.length) return;
 
-    final chunk = _lastBuiltChunks[chunkIndex];
-    final text = _renderChunkText(
-      chunk: chunk,
-      chunkIndex: chunkIndex,
-      totalChunks: _lastBuiltChunks.length,
-    );
+      final chunk = _lastBuiltChunks[chunkIndex];
+      final text = _renderChunkText(
+        chunk: chunk,
+        chunkIndex: chunkIndex,
+        totalChunks: _lastBuiltChunks.length,
+      );
 
-    await Clipboard.setData(ClipboardData(text: text));
+      await Clipboard.setData(ClipboardData(text: text));
 
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Copied chunk ${chunkIndex + 1} of ${_lastBuiltChunks.length}'),
-        duration: const Duration(seconds: 2),
-      ),
-    );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Copied chunk ${chunkIndex + 1} of ${_lastBuiltChunks.length}'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    } catch (e) {
+      _showSnackBar('Failed to copy chunk: $e');
+    }
   }
 
   Future<void> _openCopyChunkMenu() async {
-    await _ensureChunksBuilt();
-    if (!mounted) return;
+    try {
+      await _ensureChunksBuilt();
+      if (!mounted) return;
 
-    if (_lastBuiltChunks.length <= 1) {
-      return;
+      if (_lastBuiltChunks.length <= 1) {
+        return;
+      }
+
+      await showModalBottomSheet<void>(
+        context: context,
+        builder: (context) {
+          return SafeArea(
+            child: ListView.separated(
+              shrinkWrap: true,
+              itemCount: _lastBuiltChunks.length,
+              separatorBuilder: (_, __) => const Divider(height: 1),
+              itemBuilder: (context, index) {
+                final chunk = _lastBuiltChunks[index];
+                final charCount = chunk.totalChars;
+                final fileCount = chunk.sections.length;
+                final isFinalChunk = index == _lastBuiltChunks.length - 1;
+
+                return ListTile(
+                  leading: Icon(
+                    isFinalChunk ? Icons.flag_outlined : Icons.content_copy,
+                  ),
+                  title: Text(
+                    isFinalChunk
+                        ? 'Chunk ${index + 1} of ${_lastBuiltChunks.length} (final)'
+                        : 'Chunk ${index + 1} of ${_lastBuiltChunks.length}',
+                  ),
+                  subtitle: Text('$fileCount file(s) • $charCount chars'),
+                  onTap: () async {
+                    Navigator.of(context).pop();
+                    await _copyChunk(index);
+                  },
+                );
+              },
+            ),
+          );
+        },
+      );
+    } catch (e) {
+      _showSnackBar('Failed to open chunk menu: $e');
     }
-
-    await showModalBottomSheet<void>(
-      context: context,
-      builder: (context) {
-        return SafeArea(
-          child: ListView.separated(
-            shrinkWrap: true,
-            itemCount: _lastBuiltChunks.length,
-            separatorBuilder: (_, __) => const Divider(height: 1),
-            itemBuilder: (context, index) {
-              final chunk = _lastBuiltChunks[index];
-              final charCount = chunk.totalChars;
-              final fileCount = chunk.sections.length;
-              final isFinalChunk = index == _lastBuiltChunks.length - 1;
-
-              return ListTile(
-                leading: Icon(
-                  isFinalChunk ? Icons.flag_outlined : Icons.content_copy,
-                ),
-                title: Text(
-                  isFinalChunk
-                      ? 'Chunk ${index + 1} of ${_lastBuiltChunks.length} (final)'
-                      : 'Chunk ${index + 1} of ${_lastBuiltChunks.length}',
-                ),
-                subtitle: Text('$fileCount file(s) • $charCount chars'),
-                onTap: () async {
-                  Navigator.of(context).pop();
-                  await _copyChunk(index);
-                },
-              );
-            },
-          ),
-        );
-      },
-    );
   }
 
   @override
   Widget build(BuildContext context) {
     final totalBytes = _files.fold<int>(0, (sum, f) {
-      final file = File(f.path);
-      if (!file.existsSync()) return sum;
-      return sum + file.lengthSync();
+      return sum + _safeFileLength(f.path);
     });
 
     final chunkStatus = _files.isEmpty
@@ -737,8 +847,7 @@ CHATGPT INPUT INSTRUCTIONS:
               onPickFiles: _isLoading ? null : _pickFiles,
               onPickFolder: _isLoading ? null : _pickFolder,
               onCopy: _files.isEmpty ? null : _copyToClipboard,
-              onOpenCopyChunkMenu:
-              (_files.isEmpty || _isChunking || !_needsChunking)
+              onOpenCopyChunkMenu: (_files.isEmpty || _isChunking || !_needsChunking)
                   ? null
                   : _openCopyChunkMenu,
             ),
@@ -901,9 +1010,7 @@ class _TopBar extends StatelessWidget {
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        lastDir == null
-                            ? 'Last folder: (none yet)'
-                            : 'Last folder: $lastDir',
+                        lastDir == null ? 'Last folder: (none yet)' : 'Last folder: $lastDir',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: Theme.of(context).textTheme.bodySmall,
@@ -990,6 +1097,24 @@ class _FileList extends StatelessWidget {
   final List<_SelectedFile> files;
   final Future<void> Function(int index) onRemoveAt;
 
+  bool _safeFileExists(String path) {
+    try {
+      return File(path).existsSync();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  int _safeFileLength(String path) {
+    try {
+      final file = File(path);
+      if (!file.existsSync()) return 0;
+      return file.lengthSync();
+    } catch (_) {
+      return 0;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Card(
@@ -998,9 +1123,8 @@ class _FileList extends StatelessWidget {
         separatorBuilder: (_, __) => const Divider(height: 1),
         itemBuilder: (context, i) {
           final f = files[i];
-          final file = File(f.path);
-          final exists = file.existsSync();
-          final bytes = exists ? file.lengthSync() : 0;
+          final exists = _safeFileExists(f.path);
+          final bytes = exists ? _safeFileLength(f.path) : 0;
 
           return ListTile(
             leading: const Icon(Icons.insert_drive_file_outlined),
