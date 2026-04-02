@@ -4,13 +4,118 @@ import 'dart:io';
 
 import 'package:docx_to_text/docx_to_text.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+Future<List<File>> _logTargets() async {
+  final files = <File>[];
+
+  try {
+    final tempDir = Directory.systemTemp;
+    files.add(File('${tempDir.path}\\files_to_text_crash.log'));
+  } catch (_) {
+    // Ignore.
+  }
+
+  try {
+    final exeDir = File(Platform.resolvedExecutable).parent;
+    files.add(File('${exeDir.path}\\files_to_text_crash.log'));
+  } catch (_) {
+    // Ignore.
+  }
+
+  final uniquePaths = <String>{};
+  final uniqueFiles = <File>[];
+  for (final file in files) {
+    if (uniquePaths.add(file.path)) {
+      uniqueFiles.add(file);
+    }
+  }
+  return uniqueFiles;
+}
+
+Future<void> appendCrashLog(
+    String message, {
+      StackTrace? stack,
+      Object? error,
+    }) async {
+  try {
+    final targets = await _logTargets();
+    final buffer = StringBuffer()
+      ..writeln('===== ${DateTime.now().toIso8601String()} =====')
+      ..writeln(message);
+
+    if (error != null) {
+      buffer.writeln('error: $error');
+    }
+
+    if (stack != null) {
+      buffer.writeln('stack:');
+      buffer.writeln(stack.toString());
+    }
+
+    buffer.writeln();
+
+    final text = buffer.toString();
+
+    for (final file in targets) {
+      try {
+        await file.writeAsString(
+          text,
+          mode: FileMode.append,
+          flush: true,
+        );
+      } catch (_) {
+        // Ignore per-target logging failures.
+      }
+    }
+
+    if (kDebugMode) {
+      debugPrint(text);
+    }
+  } catch (_) {
+    // Never throw from logger.
+  }
+}
+
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const FilesToTextApp());
+
+  FlutterError.onError = (FlutterErrorDetails details) {
+    FlutterError.presentError(details);
+    unawaited(
+      appendCrashLog(
+        'FlutterError caught',
+        error: details.exception,
+        stack: details.stack,
+      ),
+    );
+  };
+
+  PlatformDispatcher.instance.onError = (error, stack) {
+    unawaited(
+      appendCrashLog(
+        'PlatformDispatcher.onError caught',
+        error: error,
+        stack: stack,
+      ),
+    );
+    return true;
+  };
+
+  runZonedGuarded(() {
+    runApp(const FilesToTextApp());
+  }, (error, stack) {
+    unawaited(
+      appendCrashLog(
+        'runZonedGuarded caught',
+        error: error,
+        stack: stack,
+      ),
+    );
+  });
 }
 
 class FilesToTextApp extends StatelessWidget {
@@ -98,19 +203,31 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
 
   bool get _needsChunking => _lastBuiltChunks.length > 1;
 
+  Future<void> _log(String message, {Object? error, StackTrace? stack}) {
+    return appendCrashLog(
+      message,
+      error: error,
+      stack: stack,
+    );
+  }
+
   @override
   void initState() {
     super.initState();
+    unawaited(_log('App initState'));
     unawaited(_loadPrefs());
   }
 
   @override
   void dispose() {
+    unawaited(_log('App dispose'));
     _chunkSizeController.dispose();
     super.dispose();
   }
 
   void _showSnackBar(String message) {
+    unawaited(_log('SnackBar shown: $message'));
+
     if (!mounted) return;
 
     ScaffoldMessenger.of(context).showSnackBar(
@@ -166,11 +283,19 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
   }
 
   Future<void> _loadPrefs() async {
+    await _log('_loadPrefs start');
+
     try {
       final prefs = await SharedPreferences.getInstance();
       final dir = prefs.getString(_prefsLastDirKey);
       final chunkSize = prefs.getInt(_prefsChunkSizeKey) ?? _defaultChunkSize;
       final firstHeaderModeValue = prefs.getString(_prefsFirstHeaderModeKey);
+
+      await _log(
+        '_loadPrefs loaded raw values',
+        error:
+        'dir=$dir, chunkSize=$chunkSize, firstHeaderModeValue=$firstHeaderModeValue',
+      );
 
       if (!mounted) return;
 
@@ -181,7 +306,11 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
         _chunkSizeController.text = chunkSize.toString();
         _firstHeaderMode = _FirstHeaderModeX.fromPrefs(firstHeaderModeValue);
       });
-    } catch (e) {
+
+      await _log('_loadPrefs complete');
+    } catch (e, st) {
+      await _log('_loadPrefs failed', error: e, stack: st);
+
       if (!mounted) return;
       setState(() {
         _chunkSizeController.text = _defaultChunkSize.toString();
@@ -192,30 +321,42 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
   }
 
   Future<void> _saveLastDir(String dir) async {
+    await _log('_saveLastDir start: $dir');
+
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(_prefsLastDirKey, dir);
       if (!mounted) return;
       setState(() => _lastDir = dir);
-    } catch (e) {
+      await _log('_saveLastDir complete: $dir');
+    } catch (e, st) {
+      await _log('_saveLastDir failed', error: e, stack: st);
       _showSnackBar('Failed to save last folder: $e');
     }
   }
 
   Future<void> _saveChunkSize(int size) async {
+    await _log('_saveChunkSize start: $size');
+
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setInt(_prefsChunkSizeKey, size);
-    } catch (e) {
+      await _log('_saveChunkSize complete: $size');
+    } catch (e, st) {
+      await _log('_saveChunkSize failed', error: e, stack: st);
       _showSnackBar('Failed to save chunk size: $e');
     }
   }
 
   Future<void> _saveFirstHeaderMode(_FirstHeaderMode mode) async {
+    await _log('_saveFirstHeaderMode start: ${mode.prefsValue}');
+
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(_prefsFirstHeaderModeKey, mode.prefsValue);
-    } catch (e) {
+      await _log('_saveFirstHeaderMode complete: ${mode.prefsValue}');
+    } catch (e, st) {
+      await _log('_saveFirstHeaderMode failed', error: e, stack: st);
       _showSnackBar('Failed to save first header mode: $e');
     }
   }
@@ -227,6 +368,7 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
   }
 
   Future<void> _pickFiles() async {
+    await _log('_pickFiles start');
     setState(() => _isLoading = true);
 
     try {
@@ -238,15 +380,28 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
         withData: false,
       );
 
+      await _log(
+        '_pickFiles picker returned',
+        error:
+        result == null ? 'result=null' : 'fileCount=${result.files.length}',
+      );
+
       if (result == null || result.files.isEmpty) return;
 
       final firstPath = result.files.first.path;
+      await _log('_pickFiles firstPath: $firstPath');
+
       if (firstPath != null) {
         try {
           final parent = File(firstPath).parent.path;
+          await _log('_pickFiles saving parent dir: $parent');
           await _saveLastDir(parent);
-        } catch (_) {
-          // Do not fail the whole pick operation if parent resolution fails.
+        } catch (e, st) {
+          await _log(
+            '_pickFiles failed resolving parent path',
+            error: e,
+            stack: st,
+          );
         }
       }
 
@@ -255,32 +410,60 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
           .whereType<String>()
           .toList(growable: false);
 
+      await _log('_pickFiles pickedPaths count=${pickedPaths.length}');
       await _addPaths(pickedPaths);
-    } catch (e) {
+      await _log('_pickFiles complete');
+    } catch (e, st) {
+      await _log('_pickFiles failed', error: e, stack: st);
       _showSnackBar('Failed to select files: $e');
     } finally {
       if (mounted) setState(() => _isLoading = false);
+      await _log('_pickFiles finally: isLoading=false');
     }
   }
 
   Future<List<String>> _listNestedFiles(String selectedDir) async {
+    await _log('_listNestedFiles start: $selectedDir');
+
     final nestedFiles = <String>[];
     final root = Directory(selectedDir);
+    var entityCount = 0;
+    var fileCount = 0;
 
     await for (final entity in root.list(recursive: true, followLinks: false)) {
+      entityCount++;
+
+      if (entityCount % 500 == 0) {
+        await _log(
+          '_listNestedFiles progress',
+          error: 'entityCount=$entityCount, fileCount=$fileCount',
+        );
+      }
+
       if (entity is File) {
         try {
           nestedFiles.add(entity.path);
-        } catch (_) {
-          // Skip any path that throws while being accessed.
+          fileCount++;
+        } catch (e, st) {
+          await _log(
+            '_listNestedFiles failed while reading file path',
+            error: e,
+            stack: st,
+          );
         }
       }
     }
+
+    await _log(
+      '_listNestedFiles complete',
+      error: 'entityCount=$entityCount, fileCount=$fileCount',
+    );
 
     return nestedFiles;
   }
 
   Future<void> _pickFolder() async {
+    await _log('_pickFolder start');
     setState(() => _isLoading = true);
 
     try {
@@ -289,29 +472,59 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
         initialDirectory: _lastDir,
       );
 
+      await _log('_pickFolder picker returned: $selectedDir');
+
       if (selectedDir == null || selectedDir.isEmpty) return;
 
       await _saveLastDir(selectedDir);
 
-      if (!_safeDirectoryExists(selectedDir)) return;
+      final exists = _safeDirectoryExists(selectedDir);
+      await _log('_pickFolder directory exists check: $exists');
+
+      if (!exists) return;
 
       final nestedFiles = await _listNestedFiles(selectedDir);
+      await _log('_pickFolder nestedFiles count=${nestedFiles.length}');
       await _addPaths(nestedFiles);
-    } catch (e) {
+      await _log('_pickFolder complete');
+    } catch (e, st) {
+      await _log('_pickFolder failed', error: e, stack: st);
       _showSnackBar('Failed to select folder: $e');
     } finally {
       if (mounted) setState(() => _isLoading = false);
+      await _log('_pickFolder finally: isLoading=false');
     }
   }
 
   Future<void> _addPaths(List<String> paths) async {
+    await _log('_addPaths start: incoming=${paths.length}');
+
     try {
       final existingPaths = _files.map((f) => f.path).toSet();
       final loaded = <_SelectedFile>[];
+      var checked = 0;
+      var skippedExisting = 0;
+      var skippedMissing = 0;
 
       for (final path in paths) {
-        if (existingPaths.contains(path)) continue;
-        if (!_safeFileExists(path)) continue;
+        checked++;
+
+        if (checked % 500 == 0) {
+          await _log(
+            '_addPaths progress',
+            error:
+            'checked=$checked, loaded=${loaded.length}, skippedExisting=$skippedExisting, skippedMissing=$skippedMissing',
+          );
+        }
+
+        if (existingPaths.contains(path)) {
+          skippedExisting++;
+          continue;
+        }
+        if (!_safeFileExists(path)) {
+          skippedMissing++;
+          continue;
+        }
 
         loaded.add(
           _SelectedFile(
@@ -322,6 +535,12 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
         existingPaths.add(path);
       }
 
+      await _log(
+        '_addPaths filtering complete',
+        error:
+        'checked=$checked, loaded=${loaded.length}, skippedExisting=$skippedExisting, skippedMissing=$skippedMissing',
+      );
+
       if (loaded.isEmpty) return;
 
       setState(() {
@@ -329,13 +548,18 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
         _invalidateChunks();
       });
 
+      await _log('_addPaths state updated: totalFiles=${_files.length}');
       await _ensureChunksBuilt();
-    } catch (e) {
+      await _log('_addPaths complete');
+    } catch (e, st) {
+      await _log('_addPaths failed', error: e, stack: st);
       _showSnackBar('Failed while adding selected files: $e');
     }
   }
 
   Future<void> _removeFileAt(int index) async {
+    await _log('_removeFileAt start: index=$index');
+
     if (index < 0 || index >= _files.length) return;
 
     setState(() {
@@ -343,14 +567,20 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
       _invalidateChunks();
     });
 
+    await _log('_removeFileAt state updated: totalFiles=${_files.length}');
+
     if (_files.isNotEmpty) {
       await _ensureChunksBuilt();
     } else if (mounted) {
       setState(() {});
     }
+
+    await _log('_removeFileAt complete');
   }
 
   void _clear() {
+    unawaited(_log('_clear invoked'));
+
     setState(() {
       _files.clear();
       _invalidateChunks();
@@ -358,10 +588,13 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
   }
 
   void _invalidateChunks() {
+    unawaited(_log('_invalidateChunks'));
     _lastBuiltChunks = [];
   }
 
   Future<void> _onChunkSizeChanged(String _) async {
+    await _log('_onChunkSizeChanged start: value=${_chunkSizeController.text}');
+
     _invalidateChunks();
 
     if (_files.isEmpty) {
@@ -370,9 +603,12 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
     }
 
     await _ensureChunksBuilt();
+    await _log('_onChunkSizeChanged complete');
   }
 
   Future<void> _onFirstHeaderModeChanged(_FirstHeaderMode? mode) async {
+    await _log('_onFirstHeaderModeChanged start: ${mode?.prefsValue}');
+
     if (mode == null) return;
 
     await _saveFirstHeaderMode(mode);
@@ -386,6 +622,8 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
     if (_files.isNotEmpty) {
       await _ensureChunksBuilt();
     }
+
+    await _log('_onFirstHeaderModeChanged complete: ${mode.prefsValue}');
   }
 
   String _extLower(String nameOrPath) {
@@ -396,14 +634,38 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
 
   Future<String> _readFileAsTextSmart(_SelectedFile f) async {
     final file = File(f.path);
+    final ext = _extLower(f.name);
+    final length = _safeFileLength(f.path);
+
+    await _log(
+      '_readFileAsTextSmart start',
+      error: 'path=${f.path}, ext=$ext, length=$length',
+    );
+
     final bytes = await file.readAsBytes();
 
-    final ext = _extLower(f.name);
+    await _log(
+      '_readFileAsTextSmart bytes loaded',
+      error: 'path=${f.path}, bytes=${bytes.length}',
+    );
+
     if (ext == 'docx') {
-      return docxToText(bytes);
+      await _log('_readFileAsTextSmart docxToText start: ${f.path}');
+      final result = docxToText(bytes);
+      await _log(
+        '_readFileAsTextSmart docxToText complete',
+        error: 'path=${f.path}, chars=${result.length}',
+      );
+      return result;
     }
 
-    return utf8.decode(bytes, allowMalformed: true);
+    await _log('_readFileAsTextSmart utf8.decode start: ${f.path}');
+    final result = utf8.decode(bytes, allowMalformed: true);
+    await _log(
+      '_readFileAsTextSmart utf8.decode complete',
+      error: 'path=${f.path}, chars=${result.length}',
+    );
+    return result;
   }
 
   String _buildFirstFileHeader({
@@ -533,6 +795,12 @@ Do not infer unseen implementations.
         required int totalFiles,
         required bool isChunkedOutput,
       }) async {
+    await _log(
+      '_buildSingleFileSection start',
+      error:
+      'path=${f.path}, includeFirstHeader=$includeFirstHeader, isChunkedOutput=$isChunkedOutput',
+    );
+
     final buffer = StringBuffer();
 
     if (includeFirstHeader) {
@@ -546,13 +814,23 @@ Do not infer unseen implementations.
 
     if (!_safeFileExists(f.path)) {
       buffer.writeln('[Missing file: ${f.path}]');
+      await _log('_buildSingleFileSection missing file: ${f.path}');
       return buffer.toString();
     }
 
     try {
       final text = await _readFileAsTextSmart(f);
       buffer.writeln(text);
-    } catch (e) {
+      await _log(
+        '_buildSingleFileSection complete',
+        error: 'path=${f.path}, chars=${text.length}',
+      );
+    } catch (e, st) {
+      await _log(
+        '_buildSingleFileSection failed reading file',
+        error: e,
+        stack: st,
+      );
       buffer.writeln('[Failed to read ${f.path}: $e]');
     }
 
@@ -560,10 +838,13 @@ Do not infer unseen implementations.
   }
 
   Future<String> _buildClipboardText() async {
+    await _log('_buildClipboardText start');
     final buffer = StringBuffer();
     final totalFiles = _files.length;
 
     for (var i = 0; i < _files.length; i++) {
+      await _log('_buildClipboardText section ${i + 1}/$totalFiles');
+
       final section = await _buildSingleFileSection(
         _files[i],
         includeFirstHeader: i == 0,
@@ -578,18 +859,31 @@ Do not infer unseen implementations.
       }
     }
 
+    await _log('_buildClipboardText complete');
     return buffer.toString();
   }
 
   Future<List<_ChunkPlan>> _buildChunkPlans() async {
+    await _log('_buildChunkPlans start');
+
     final chunkSize = _chunkSize;
     await _saveChunkSize(chunkSize);
 
     final sections = <_BuiltSection>[];
     final totalFiles = _files.length;
 
+    await _log(
+      '_buildChunkPlans config',
+      error: 'chunkSize=$chunkSize, totalFiles=$totalFiles',
+    );
+
     for (var i = 0; i < _files.length; i++) {
       final f = _files[i];
+      await _log(
+        '_buildChunkPlans building section ${i + 1}/$totalFiles',
+        error: f.path,
+      );
+
       final text = await _buildSingleFileSection(
         f,
         includeFirstHeader: i == 0,
@@ -628,6 +922,7 @@ Do not infer unseen implementations.
       chunks.add(_ChunkPlan(sections: List<_BuiltSection>.from(currentSections)));
     }
 
+    await _log('_buildChunkPlans complete: chunkCount=${chunks.length}');
     return chunks;
   }
 
@@ -688,10 +983,13 @@ CHATGPT INPUT INSTRUCTIONS:
   }
 
   Future<void> _copyToClipboard() async {
+    await _log('_copyToClipboard start');
+
     if (_files.isEmpty) return;
 
     try {
       final text = await _buildClipboardText();
+      await _log('_copyToClipboard clipboard set start: chars=${text.length}');
       await Clipboard.setData(ClipboardData(text: text));
 
       if (!mounted) return;
@@ -701,14 +999,26 @@ CHATGPT INPUT INSTRUCTIONS:
           duration: const Duration(seconds: 2),
         ),
       );
-    } catch (e) {
+
+      await _log('_copyToClipboard complete');
+    } catch (e, st) {
+      await _log('_copyToClipboard failed', error: e, stack: st);
       _showSnackBar('Failed to copy files: $e');
     }
   }
 
   Future<void> _ensureChunksBuilt() async {
+    await _log(
+      '_ensureChunksBuilt start',
+      error:
+      'fileCount=${_files.length}, cachedChunkCount=${_lastBuiltChunks.length}',
+    );
+
     if (_files.isEmpty) return;
-    if (_lastBuiltChunks.isNotEmpty) return;
+    if (_lastBuiltChunks.isNotEmpty) {
+      await _log('_ensureChunksBuilt skipped due to cache');
+      return;
+    }
 
     setState(() => _isChunking = true);
     try {
@@ -717,16 +1027,21 @@ CHATGPT INPUT INSTRUCTIONS:
       setState(() {
         _lastBuiltChunks = chunks;
       });
-    } catch (e) {
+      await _log('_ensureChunksBuilt complete: chunkCount=${chunks.length}');
+    } catch (e, st) {
+      await _log('_ensureChunksBuilt failed', error: e, stack: st);
       _showSnackBar('Failed to build chunks: $e');
     } finally {
       if (mounted) {
         setState(() => _isChunking = false);
       }
+      await _log('_ensureChunksBuilt finally: isChunking=false');
     }
   }
 
   Future<void> _copyChunk(int chunkIndex) async {
+    await _log('_copyChunk start: index=$chunkIndex');
+
     if (_files.isEmpty) return;
 
     try {
@@ -741,6 +1056,10 @@ CHATGPT INPUT INSTRUCTIONS:
         totalChunks: _lastBuiltChunks.length,
       );
 
+      await _log(
+        '_copyChunk clipboard set start',
+        error: 'index=$chunkIndex, chars=${text.length}',
+      );
       await Clipboard.setData(ClipboardData(text: text));
 
       if (!mounted) return;
@@ -750,17 +1069,23 @@ CHATGPT INPUT INSTRUCTIONS:
           duration: const Duration(seconds: 2),
         ),
       );
-    } catch (e) {
+
+      await _log('_copyChunk complete: index=$chunkIndex');
+    } catch (e, st) {
+      await _log('_copyChunk failed', error: e, stack: st);
       _showSnackBar('Failed to copy chunk: $e');
     }
   }
 
   Future<void> _openCopyChunkMenu() async {
+    await _log('_openCopyChunkMenu start');
+
     try {
       await _ensureChunksBuilt();
       if (!mounted) return;
 
       if (_lastBuiltChunks.length <= 1) {
+        await _log('_openCopyChunkMenu skipped: <=1 chunks');
         return;
       }
 
@@ -789,6 +1114,7 @@ CHATGPT INPUT INSTRUCTIONS:
                   ),
                   subtitle: Text('$fileCount file(s) • $charCount chars'),
                   onTap: () async {
+                    await _log('_openCopyChunkMenu tapped chunk index=$index');
                     Navigator.of(context).pop();
                     await _copyChunk(index);
                   },
@@ -798,7 +1124,10 @@ CHATGPT INPUT INSTRUCTIONS:
           );
         },
       );
-    } catch (e) {
+
+      await _log('_openCopyChunkMenu complete');
+    } catch (e, st) {
+      await _log('_openCopyChunkMenu failed', error: e, stack: st);
       _showSnackBar('Failed to open chunk menu: $e');
     }
   }
@@ -847,7 +1176,8 @@ CHATGPT INPUT INSTRUCTIONS:
               onPickFiles: _isLoading ? null : _pickFiles,
               onPickFolder: _isLoading ? null : _pickFolder,
               onCopy: _files.isEmpty ? null : _copyToClipboard,
-              onOpenCopyChunkMenu: (_files.isEmpty || _isChunking || !_needsChunking)
+              onOpenCopyChunkMenu:
+              (_files.isEmpty || _isChunking || !_needsChunking)
                   ? null
                   : _openCopyChunkMenu,
             ),
@@ -1010,7 +1340,9 @@ class _TopBar extends StatelessWidget {
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        lastDir == null ? 'Last folder: (none yet)' : 'Last folder: $lastDir',
+                        lastDir == null
+                            ? 'Last folder: (none yet)'
+                            : 'Last folder: $lastDir',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: Theme.of(context).textTheme.bodySmall,
