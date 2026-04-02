@@ -81,31 +81,31 @@ Future<void> appendCrashLog(
 }
 
 void main() {
-  WidgetsFlutterBinding.ensureInitialized();
-
-  FlutterError.onError = (FlutterErrorDetails details) {
-    FlutterError.presentError(details);
-    unawaited(
-      appendCrashLog(
-        'FlutterError caught',
-        error: details.exception,
-        stack: details.stack,
-      ),
-    );
-  };
-
-  PlatformDispatcher.instance.onError = (error, stack) {
-    unawaited(
-      appendCrashLog(
-        'PlatformDispatcher.onError caught',
-        error: error,
-        stack: stack,
-      ),
-    );
-    return true;
-  };
-
   runZonedGuarded(() {
+    WidgetsFlutterBinding.ensureInitialized();
+
+    FlutterError.onError = (FlutterErrorDetails details) {
+      FlutterError.presentError(details);
+      unawaited(
+        appendCrashLog(
+          'FlutterError caught',
+          error: details.exception,
+          stack: details.stack,
+        ),
+      );
+    };
+
+    PlatformDispatcher.instance.onError = (error, stack) {
+      unawaited(
+        appendCrashLog(
+          'PlatformDispatcher.onError caught',
+          error: error,
+          stack: stack,
+        ),
+      );
+      return true;
+    };
+
     runApp(const FilesToTextApp());
   }, (error, stack) {
     unawaited(
@@ -191,6 +191,7 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
 
   bool _isLoading = false;
   bool _isChunking = false;
+  bool _chunksDirty = false;
   String? _lastDir;
 
   final TextEditingController _chunkSizeController = TextEditingController();
@@ -201,7 +202,8 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
 
   _FirstHeaderMode _firstHeaderMode = _FirstHeaderMode.strictContext;
 
-  bool get _needsChunking => _lastBuiltChunks.length > 1;
+  bool get _needsChunking =>
+      _lastBuiltChunks.length > 1 || (_chunksDirty && _files.isNotEmpty);
 
   Future<void> _log(String message, {Object? error, StackTrace? stack}) {
     return appendCrashLog(
@@ -549,7 +551,6 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
       });
 
       await _log('_addPaths state updated: totalFiles=${_files.length}');
-      await _ensureChunksBuilt();
       await _log('_addPaths complete');
     } catch (e, st) {
       await _log('_addPaths failed', error: e, stack: st);
@@ -568,13 +569,6 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
     });
 
     await _log('_removeFileAt state updated: totalFiles=${_files.length}');
-
-    if (_files.isNotEmpty) {
-      await _ensureChunksBuilt();
-    } else if (mounted) {
-      setState(() {});
-    }
-
     await _log('_removeFileAt complete');
   }
 
@@ -583,13 +577,15 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
 
     setState(() {
       _files.clear();
-      _invalidateChunks();
+      _lastBuiltChunks = [];
+      _chunksDirty = false;
     });
   }
 
   void _invalidateChunks() {
     unawaited(_log('_invalidateChunks'));
     _lastBuiltChunks = [];
+    _chunksDirty = _files.isNotEmpty;
   }
 
   Future<void> _onChunkSizeChanged(String _) async {
@@ -597,12 +593,10 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
 
     _invalidateChunks();
 
-    if (_files.isEmpty) {
-      if (mounted) setState(() {});
-      return;
+    if (mounted) {
+      setState(() {});
     }
 
-    await _ensureChunksBuilt();
     await _log('_onChunkSizeChanged complete');
   }
 
@@ -618,10 +612,6 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
       _firstHeaderMode = mode;
       _invalidateChunks();
     });
-
-    if (_files.isNotEmpty) {
-      await _ensureChunksBuilt();
-    }
 
     await _log('_onFirstHeaderModeChanged complete: ${mode.prefsValue}');
   }
@@ -903,7 +893,9 @@ Do not infer unseen implementations.
       final projectedLength = currentLength + separatorLength + sectionLength;
 
       if (currentSections.isNotEmpty && projectedLength > chunkSize) {
-        chunks.add(_ChunkPlan(sections: List<_BuiltSection>.from(currentSections)));
+        chunks.add(
+          _ChunkPlan(sections: List<_BuiltSection>.from(currentSections)),
+        );
         currentSections = [section];
         currentLength = sectionLength;
         continue;
@@ -1011,11 +1003,11 @@ CHATGPT INPUT INSTRUCTIONS:
     await _log(
       '_ensureChunksBuilt start',
       error:
-      'fileCount=${_files.length}, cachedChunkCount=${_lastBuiltChunks.length}',
+      'fileCount=${_files.length}, cachedChunkCount=${_lastBuiltChunks.length}, chunksDirty=$_chunksDirty',
     );
 
     if (_files.isEmpty) return;
-    if (_lastBuiltChunks.isNotEmpty) {
+    if (_lastBuiltChunks.isNotEmpty && !_chunksDirty) {
       await _log('_ensureChunksBuilt skipped due to cache');
       return;
     }
@@ -1026,6 +1018,7 @@ CHATGPT INPUT INSTRUCTIONS:
       if (!mounted) return;
       setState(() {
         _lastBuiltChunks = chunks;
+        _chunksDirty = false;
       });
       await _log('_ensureChunksBuilt complete: chunkCount=${chunks.length}');
     } catch (e, st) {
@@ -1065,7 +1058,9 @@ CHATGPT INPUT INSTRUCTIONS:
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Copied chunk ${chunkIndex + 1} of ${_lastBuiltChunks.length}'),
+          content: Text(
+            'Copied chunk ${chunkIndex + 1} of ${_lastBuiltChunks.length}',
+          ),
           duration: const Duration(seconds: 2),
         ),
       );
@@ -1140,8 +1135,12 @@ CHATGPT INPUT INSTRUCTIONS:
 
     final chunkStatus = _files.isEmpty
         ? 'No files selected'
+        : _isChunking
+        ? 'Rebuilding chunks...'
+        : _chunksDirty
+        ? 'Chunks invalidated; will rebuild on copy'
         : _lastBuiltChunks.isEmpty
-        ? 'Calculating chunks...'
+        ? 'Chunks not built yet'
         : _lastBuiltChunks.length == 1
         ? 'Everything fits in one copy'
         : 'Chunks ready: ${_lastBuiltChunks.length}';
