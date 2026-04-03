@@ -134,6 +134,19 @@ void main() {
   });
 }
 
+String _workerNormalizePath(String path) => path.replaceAll('\\', '/');
+
+bool _workerShouldIgnorePath(String path) {
+  final normalized = _workerNormalizePath(path);
+  final segments = normalized.split('/');
+  for (final segment in segments) {
+    if (_workerIgnoredDirectoryNames.contains(segment)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 String _workerExtLower(String nameOrPath) {
   final dot = nameOrPath.lastIndexOf('.');
   if (dot == -1) return '';
@@ -328,6 +341,65 @@ Future<String> _workerBuildSingleFileSection({
   }
 
   return buffer.toString();
+}
+
+Map<String, dynamic> _listNestedFilesWorker(Map<String, dynamic> args) {
+  final selectedDir = args['selectedDir'] as String;
+  final pending = <Directory>[Directory(selectedDir)];
+  final nestedFiles = <String>[];
+
+  var visitedDirs = 0;
+  var visitedEntities = 0;
+  var skippedIgnored = 0;
+  var skippedUnreadableDirs = 0;
+  var skippedUnreadableEntities = 0;
+
+  while (pending.isNotEmpty) {
+    final dir = pending.removeLast();
+    visitedDirs++;
+
+    if (_workerShouldIgnorePath(dir.path)) {
+      skippedIgnored++;
+      continue;
+    }
+
+    List<FileSystemEntity> children;
+    try {
+      children = dir.listSync(followLinks: false);
+    } catch (_) {
+      skippedUnreadableDirs++;
+      continue;
+    }
+
+    for (final entity in children) {
+      visitedEntities++;
+
+      final entityPath = entity.path;
+      if (_workerShouldIgnorePath(entityPath)) {
+        skippedIgnored++;
+        continue;
+      }
+
+      try {
+        if (entity is File) {
+          nestedFiles.add(entityPath);
+        } else if (entity is Directory) {
+          pending.add(entity);
+        }
+      } catch (_) {
+        skippedUnreadableEntities++;
+      }
+    }
+  }
+
+  return {
+    'paths': nestedFiles,
+    'visitedDirs': visitedDirs,
+    'visitedEntities': visitedEntities,
+    'skippedIgnored': skippedIgnored,
+    'skippedUnreadableDirs': skippedUnreadableDirs,
+    'skippedUnreadableEntities': skippedUnreadableEntities,
+  };
 }
 
 Future<Map<String, dynamic>> _buildClipboardWorker(
@@ -770,49 +842,22 @@ class _FilesToTextPageState extends State<FilesToTextPage>
   Future<List<String>> _listNestedFiles(String selectedDir) async {
     await _log('_listNestedFiles start: $selectedDir');
 
-    final nestedFiles = <String>[];
-    final root = Directory(selectedDir);
-    var entityCount = 0;
-    var fileCount = 0;
-    var skippedIgnored = 0;
+    final result = await compute(
+      _listNestedFilesWorker,
+      <String, dynamic>{
+        'selectedDir': selectedDir,
+      },
+    );
 
-    await for (final entity in root.list(recursive: true, followLinks: false)) {
-      entityCount++;
-
-      if (entityCount % 500 == 0) {
-        await _log(
-          '_listNestedFiles progress',
-          error:
-          'entityCount=$entityCount, fileCount=$fileCount, skippedIgnored=$skippedIgnored',
-        );
-      }
-
-      if (_shouldIgnorePath(entity.path)) {
-        skippedIgnored++;
-        continue;
-      }
-
-      if (entity is File) {
-        try {
-          nestedFiles.add(entity.path);
-          fileCount++;
-        } catch (e, st) {
-          await _log(
-            '_listNestedFiles failed while reading file path',
-            error: e,
-            stack: st,
-          );
-        }
-      }
-    }
+    final paths = List<String>.from(result['paths'] as List? ?? const []);
 
     await _log(
       '_listNestedFiles complete',
       error:
-      'entityCount=$entityCount, fileCount=$fileCount, skippedIgnored=$skippedIgnored',
+      'paths=${paths.length}, visitedDirs=${result['visitedDirs']}, visitedEntities=${result['visitedEntities']}, skippedIgnored=${result['skippedIgnored']}, skippedUnreadableDirs=${result['skippedUnreadableDirs']}, skippedUnreadableEntities=${result['skippedUnreadableEntities']}',
     );
 
-    return nestedFiles;
+    return paths;
   }
 
   Future<void> _pickFolder() async {
@@ -820,10 +865,21 @@ class _FilesToTextPageState extends State<FilesToTextPage>
     setState(() => _isLoading = true);
 
     try {
-      final selectedDir = await FilePicker.platform.getDirectoryPath(
-        dialogTitle: 'Select folder to include recursively',
-        initialDirectory: _lastDir,
-      );
+      await _log('_pickFolder calling picker with lastDir=$_lastDir');
+
+      String? selectedDir;
+      final lastDir = _lastDir;
+
+      if (lastDir != null && lastDir.trim().isNotEmpty) {
+        selectedDir = await FilePicker.platform.getDirectoryPath(
+          dialogTitle: 'Select folder to include recursively',
+          initialDirectory: lastDir,
+        );
+      } else {
+        selectedDir = await FilePicker.platform.getDirectoryPath(
+          dialogTitle: 'Select folder to include recursively',
+        );
+      }
 
       await _log('_pickFolder picker returned: $selectedDir');
 
@@ -835,6 +891,11 @@ class _FilesToTextPageState extends State<FilesToTextPage>
       await _log('_pickFolder directory exists check: $exists');
 
       if (!exists) return;
+
+      if (!mounted) return;
+      setState(() {
+        _chunkOperationStatus = 'Scanning folder...';
+      });
 
       final nestedFiles = await _listNestedFiles(selectedDir);
       await _log('_pickFolder nestedFiles count=${nestedFiles.length}');
