@@ -9,6 +9,22 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+const Set<String> _workerIgnoredDirectoryNames = {
+  'node_modules',
+  '.dart_tool',
+  'build',
+  '.git',
+  '.idea',
+  'coverage',
+  'Pods',
+  '.symlinks',
+  '.gradle',
+  '.next',
+  '.nuxt',
+  'dist',
+  'out',
+};
+
 Future<List<File>> _logTargets() async {
   final files = <File>[];
 
@@ -118,6 +134,289 @@ void main() {
   });
 }
 
+String _workerExtLower(String nameOrPath) {
+  final dot = nameOrPath.lastIndexOf('.');
+  if (dot == -1) return '';
+  return nameOrPath.substring(dot + 1).toLowerCase();
+}
+
+String _workerBuildFirstFileHeader({
+  required String firstHeaderMode,
+  required int totalFiles,
+  required bool isChunkedOutput,
+}) {
+  if (firstHeaderMode == 'none') {
+    return '';
+  }
+
+  final sourceContext = totalFiles <= 1
+      ? 'The pasted content starts with a single provided file.'
+      : 'The pasted content starts with the first file from a selected set of $totalFiles files.';
+
+  final scopeContext = isChunkedOutput
+      ? 'Use this header only as analysis guidance. The chunk instructions above control chunk flow, waiting behavior, and how to treat multiple chunks together.'
+      : 'Apply these instructions to the pasted content in this message.';
+
+  switch (firstHeaderMode) {
+    case 'lightweight':
+      return '''
+CHATGPT FIRST-FILE HEADER:
+$sourceContext
+$scopeContext
+
+Only use the provided content.
+Do not assume missing context.
+If important context is missing, say what is needed instead of guessing.
+
+''';
+    case 'strictContext':
+      return '''
+CHATGPT FIRST-FILE HEADER:
+$sourceContext
+$scopeContext
+
+Analyze only the provided content.
+Do NOT assume missing files, functions, dependencies, or behavior.
+If required context is missing, explicitly state what is missing.
+Do NOT guess or fabricate implementations.
+
+When answering, be precise and grounded in the provided content.
+Reference specific parts of the content when possible.
+
+''';
+    case 'debugging':
+      return '''
+CHATGPT FIRST-FILE HEADER:
+$sourceContext
+$scopeContext
+
+Use a debugging-focused analysis style.
+
+Rules:
+- Only use the provided content.
+- Do NOT assume hidden logic, missing dependencies, or unseen implementations.
+- If the issue cannot be determined from the provided content alone, explain what additional context is required.
+
+Focus on:
+- Likely causes within the provided content
+- Edge cases
+- Incorrect assumptions in the logic
+
+''';
+    case 'architecture':
+      return '''
+CHATGPT FIRST-FILE HEADER:
+$sourceContext
+$scopeContext
+
+Use an architecture/review-focused analysis style.
+
+Constraints:
+- Only evaluate what is present.
+- Do NOT assume missing files or systems.
+- If something appears incomplete, call it out explicitly.
+
+Focus on:
+- Structure and organization
+- Maintainability
+- Potential risks or scalability concerns
+
+''';
+    case 'refactor':
+      return '''
+CHATGPT FIRST-FILE HEADER:
+$sourceContext
+$scopeContext
+
+Use a safe-refactor analysis style.
+
+Rules:
+- Only modify or evaluate what is shown.
+- Do NOT introduce dependencies on unseen code.
+- If a better solution requires additional context, explain what is needed instead of guessing.
+
+Goal:
+- Improve clarity, safety, and correctness
+- Keep behavior consistent unless explicitly told otherwise
+
+''';
+    case 'ultraStrict':
+      return '''
+CHATGPT FIRST-FILE HEADER:
+$sourceContext
+$scopeContext
+
+STRICT MODE:
+
+- Use ONLY the provided content.
+- ZERO assumptions about missing files or behavior.
+- If anything necessary is unclear or missing, stop and list what is needed.
+- If the question cannot be fully answered from the provided content, respond with "Insufficient context" and explain why.
+
+Do not speculate.
+Do not infer unseen implementations.
+
+''';
+    case 'none':
+      return '';
+    default:
+      return '''
+CHATGPT FIRST-FILE HEADER:
+$sourceContext
+$scopeContext
+
+Analyze only the provided content.
+Do NOT assume missing files, functions, dependencies, or behavior.
+If required context is missing, explicitly state what is missing.
+Do NOT guess or fabricate implementations.
+
+When answering, be precise and grounded in the provided content.
+Reference specific parts of the content when possible.
+
+''';
+  }
+}
+
+Future<String> _workerReadFileAsText({
+  required String path,
+  required String name,
+}) async {
+  final file = File(path);
+  final ext = _workerExtLower(name);
+  final bytes = await file.readAsBytes();
+
+  if (ext == 'docx') {
+    return docxToText(bytes);
+  }
+
+  return utf8.decode(bytes, allowMalformed: true);
+}
+
+Future<String> _workerBuildSingleFileSection({
+  required String path,
+  required String name,
+  required bool includeFirstHeader,
+  required int totalFiles,
+  required bool isChunkedOutput,
+  required String firstHeaderMode,
+}) async {
+  final buffer = StringBuffer();
+
+  if (includeFirstHeader) {
+    buffer.write(
+      _workerBuildFirstFileHeader(
+        firstHeaderMode: firstHeaderMode,
+        totalFiles: totalFiles,
+        isChunkedOutput: isChunkedOutput,
+      ),
+    );
+  }
+
+  buffer.writeln('===== $path =====');
+
+  final file = File(path);
+  if (!file.existsSync()) {
+    buffer.writeln('[Missing file: $path]');
+    return buffer.toString();
+  }
+
+  try {
+    final text = await _workerReadFileAsText(path: path, name: name);
+    buffer.writeln(text);
+  } catch (e) {
+    buffer.writeln('[Failed to read $path: $e]');
+  }
+
+  return buffer.toString();
+}
+
+Future<Map<String, dynamic>> _buildClipboardWorker(
+    Map<String, dynamic> args,
+    ) async {
+  final files = List<Map<String, dynamic>>.from(args['files'] as List);
+  final firstHeaderMode = args['firstHeaderMode'] as String? ?? 'strictContext';
+
+  final buffer = StringBuffer();
+  final totalFiles = files.length;
+
+  for (var i = 0; i < files.length; i++) {
+    final f = files[i];
+    final section = await _workerBuildSingleFileSection(
+      path: f['path'] as String,
+      name: f['name'] as String,
+      includeFirstHeader: i == 0,
+      totalFiles: totalFiles,
+      isChunkedOutput: false,
+      firstHeaderMode: firstHeaderMode,
+    );
+    buffer.write(section);
+
+    if (i != files.length - 1) {
+      buffer.writeln();
+      buffer.writeln();
+    }
+  }
+
+  return {
+    'text': buffer.toString(),
+  };
+}
+
+Future<Map<String, dynamic>> _buildChunksWorker(
+    Map<String, dynamic> args,
+    ) async {
+  final files = List<Map<String, dynamic>>.from(args['files'] as List);
+  final chunkSize = args['chunkSize'] as int;
+  final firstHeaderMode = args['firstHeaderMode'] as String? ?? 'strictContext';
+
+  final totalFiles = files.length;
+  final chunks = <Map<String, dynamic>>[];
+  var currentSections = <String>[];
+  var currentLength = 0;
+
+  for (var i = 0; i < files.length; i++) {
+    final f = files[i];
+    final text = await _workerBuildSingleFileSection(
+      path: f['path'] as String,
+      name: f['name'] as String,
+      includeFirstHeader: i == 0,
+      totalFiles: totalFiles,
+      isChunkedOutput: true,
+      firstHeaderMode: firstHeaderMode,
+    );
+
+    final separatorLength = currentSections.isEmpty ? 0 : 2;
+    final sectionLength = text.length;
+    final projectedLength = currentLength + separatorLength + sectionLength;
+
+    if (currentSections.isNotEmpty && projectedLength > chunkSize) {
+      chunks.add({
+        'sections': List<String>.from(currentSections),
+        'totalChars': currentLength,
+      });
+      currentSections = [text];
+      currentLength = sectionLength;
+    } else if (currentSections.isEmpty) {
+      currentSections.add(text);
+      currentLength = sectionLength;
+    } else {
+      currentSections.add(text);
+      currentLength = projectedLength;
+    }
+  }
+
+  if (currentSections.isNotEmpty) {
+    chunks.add({
+      'sections': List<String>.from(currentSections),
+      'totalChars': currentLength,
+    });
+  }
+
+  return {
+    'chunks': chunks,
+  };
+}
+
 class FilesToTextApp extends StatelessWidget {
   const FilesToTextApp({super.key});
 
@@ -182,7 +481,8 @@ class FilesToTextPage extends StatefulWidget {
   State<FilesToTextPage> createState() => _FilesToTextPageState();
 }
 
-class _FilesToTextPageState extends State<FilesToTextPage> {
+class _FilesToTextPageState extends State<FilesToTextPage>
+    with WidgetsBindingObserver {
   static const String _prefsLastDirKey = 'last_dir';
   static const String _prefsChunkSizeKey = 'chunk_size_chars';
   static const String _prefsFirstHeaderModeKey = 'first_header_mode';
@@ -191,14 +491,14 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
 
   bool _isLoading = false;
   bool _isChunking = false;
-  bool _chunksDirty = false;
   String? _lastDir;
+  String? _chunkOperationStatus;
+  int _operationSerial = 0;
 
   final TextEditingController _chunkSizeController = TextEditingController();
-
   final List<_SelectedFile> _files = [];
-
   List<_ChunkPlan> _lastBuiltChunks = [];
+  bool _chunksDirty = false;
 
   _FirstHeaderMode _firstHeaderMode = _FirstHeaderMode.strictContext;
 
@@ -216,16 +516,29 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     unawaited(_log('App initState'));
     unawaited(_loadPrefs());
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     unawaited(_log('App dispose'));
     _chunkSizeController.dispose();
     super.dispose();
   }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    unawaited(_log('Lifecycle changed: $state'));
+  }
+
+  void _bumpOperationSerial() {
+    _operationSerial++;
+  }
+
+  bool _isStaleOperation(int serial) => serial != _operationSerial;
 
   void _showSnackBar(String message) {
     unawaited(_log('SnackBar shown: $message'));
@@ -273,7 +586,7 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
         return segments.last;
       }
     } catch (_) {
-      // Fall through to path-based fallback.
+      // Fall through.
     }
 
     final normalized = path.replaceAll('\\', '/');
@@ -282,6 +595,26 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
       return path;
     }
     return normalized.substring(index + 1);
+  }
+
+  bool _shouldIgnorePath(String path) {
+    final normalized = path.replaceAll('\\', '/');
+    final segments = normalized.split('/');
+    for (final segment in segments) {
+      if (_workerIgnoredDirectoryNames.contains(segment)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  List<Map<String, dynamic>> _fileSnapshot() {
+    return _files
+        .map((f) => <String, dynamic>{
+      'path': f.path,
+      'name': f.name,
+    })
+        .toList(growable: false);
   }
 
   Future<void> _loadPrefs() async {
@@ -369,6 +702,15 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
     return parsed;
   }
 
+  void _invalidateChunks() {
+    unawaited(_log('_invalidateChunks'));
+    _bumpOperationSerial();
+    _lastBuiltChunks = [];
+    _chunksDirty = _files.isNotEmpty;
+    _chunkOperationStatus =
+    _files.isNotEmpty ? 'Chunks invalidated; will rebuild on copy' : null;
+  }
+
   Future<void> _pickFiles() async {
     await _log('_pickFiles start');
     setState(() => _isLoading = true);
@@ -410,6 +752,7 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
       final pickedPaths = result.files
           .map((f) => f.path)
           .whereType<String>()
+          .where((path) => !_shouldIgnorePath(path))
           .toList(growable: false);
 
       await _log('_pickFiles pickedPaths count=${pickedPaths.length}');
@@ -431,6 +774,7 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
     final root = Directory(selectedDir);
     var entityCount = 0;
     var fileCount = 0;
+    var skippedIgnored = 0;
 
     await for (final entity in root.list(recursive: true, followLinks: false)) {
       entityCount++;
@@ -438,8 +782,14 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
       if (entityCount % 500 == 0) {
         await _log(
           '_listNestedFiles progress',
-          error: 'entityCount=$entityCount, fileCount=$fileCount',
+          error:
+          'entityCount=$entityCount, fileCount=$fileCount, skippedIgnored=$skippedIgnored',
         );
+      }
+
+      if (_shouldIgnorePath(entity.path)) {
+        skippedIgnored++;
+        continue;
       }
 
       if (entity is File) {
@@ -458,7 +808,8 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
 
     await _log(
       '_listNestedFiles complete',
-      error: 'entityCount=$entityCount, fileCount=$fileCount',
+      error:
+      'entityCount=$entityCount, fileCount=$fileCount, skippedIgnored=$skippedIgnored',
     );
 
     return nestedFiles;
@@ -507,6 +858,7 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
       var checked = 0;
       var skippedExisting = 0;
       var skippedMissing = 0;
+      var skippedIgnored = 0;
 
       for (final path in paths) {
         checked++;
@@ -515,8 +867,13 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
           await _log(
             '_addPaths progress',
             error:
-            'checked=$checked, loaded=${loaded.length}, skippedExisting=$skippedExisting, skippedMissing=$skippedMissing',
+            'checked=$checked, loaded=${loaded.length}, skippedExisting=$skippedExisting, skippedMissing=$skippedMissing, skippedIgnored=$skippedIgnored',
           );
+        }
+
+        if (_shouldIgnorePath(path)) {
+          skippedIgnored++;
+          continue;
         }
 
         if (existingPaths.contains(path)) {
@@ -540,7 +897,7 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
       await _log(
         '_addPaths filtering complete',
         error:
-        'checked=$checked, loaded=${loaded.length}, skippedExisting=$skippedExisting, skippedMissing=$skippedMissing',
+        'checked=$checked, loaded=${loaded.length}, skippedExisting=$skippedExisting, skippedMissing=$skippedMissing, skippedIgnored=$skippedIgnored',
       );
 
       if (loaded.isEmpty) return;
@@ -576,16 +933,12 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
     unawaited(_log('_clear invoked'));
 
     setState(() {
+      _bumpOperationSerial();
       _files.clear();
       _lastBuiltChunks = [];
       _chunksDirty = false;
+      _chunkOperationStatus = null;
     });
-  }
-
-  void _invalidateChunks() {
-    unawaited(_log('_invalidateChunks'));
-    _lastBuiltChunks = [];
-    _chunksDirty = _files.isNotEmpty;
   }
 
   Future<void> _onChunkSizeChanged(String _) async {
@@ -614,308 +967,6 @@ class _FilesToTextPageState extends State<FilesToTextPage> {
     });
 
     await _log('_onFirstHeaderModeChanged complete: ${mode.prefsValue}');
-  }
-
-  String _extLower(String nameOrPath) {
-    final dot = nameOrPath.lastIndexOf('.');
-    if (dot == -1) return '';
-    return nameOrPath.substring(dot + 1).toLowerCase();
-  }
-
-  Future<String> _readFileAsTextSmart(_SelectedFile f) async {
-    final file = File(f.path);
-    final ext = _extLower(f.name);
-    final length = _safeFileLength(f.path);
-
-    await _log(
-      '_readFileAsTextSmart start',
-      error: 'path=${f.path}, ext=$ext, length=$length',
-    );
-
-    final bytes = await file.readAsBytes();
-
-    await _log(
-      '_readFileAsTextSmart bytes loaded',
-      error: 'path=${f.path}, bytes=${bytes.length}',
-    );
-
-    if (ext == 'docx') {
-      await _log('_readFileAsTextSmart docxToText start: ${f.path}');
-      final result = docxToText(bytes);
-      await _log(
-        '_readFileAsTextSmart docxToText complete',
-        error: 'path=${f.path}, chars=${result.length}',
-      );
-      return result;
-    }
-
-    await _log('_readFileAsTextSmart utf8.decode start: ${f.path}');
-    final result = utf8.decode(bytes, allowMalformed: true);
-    await _log(
-      '_readFileAsTextSmart utf8.decode complete',
-      error: 'path=${f.path}, chars=${result.length}',
-    );
-    return result;
-  }
-
-  String _buildFirstFileHeader({
-    required int totalFiles,
-    required bool isChunkedOutput,
-  }) {
-    if (_firstHeaderMode == _FirstHeaderMode.none) {
-      return '';
-    }
-
-    final sourceContext = totalFiles <= 1
-        ? 'The pasted content starts with a single provided file.'
-        : 'The pasted content starts with the first file from a selected set of $totalFiles files.';
-
-    final scopeContext = isChunkedOutput
-        ? 'Use this header only as analysis guidance. The chunk instructions above control chunk flow, waiting behavior, and how to treat multiple chunks together.'
-        : 'Apply these instructions to the pasted content in this message.';
-
-    switch (_firstHeaderMode) {
-      case _FirstHeaderMode.none:
-        return '';
-      case _FirstHeaderMode.lightweight:
-        return '''
-CHATGPT FIRST-FILE HEADER:
-$sourceContext
-$scopeContext
-
-Only use the provided content.
-Do not assume missing context.
-If important context is missing, say what is needed instead of guessing.
-
-''';
-      case _FirstHeaderMode.strictContext:
-        return '''
-CHATGPT FIRST-FILE HEADER:
-$sourceContext
-$scopeContext
-
-Analyze only the provided content.
-Do NOT assume missing files, functions, dependencies, or behavior.
-If required context is missing, explicitly state what is missing.
-Do NOT guess or fabricate implementations.
-
-When answering, be precise and grounded in the provided content.
-Reference specific parts of the content when possible.
-
-''';
-      case _FirstHeaderMode.debugging:
-        return '''
-CHATGPT FIRST-FILE HEADER:
-$sourceContext
-$scopeContext
-
-Use a debugging-focused analysis style.
-
-Rules:
-- Only use the provided content.
-- Do NOT assume hidden logic, missing dependencies, or unseen implementations.
-- If the issue cannot be determined from the provided content alone, explain what additional context is required.
-
-Focus on:
-- Likely causes within the provided content
-- Edge cases
-- Incorrect assumptions in the logic
-
-''';
-      case _FirstHeaderMode.architecture:
-        return '''
-CHATGPT FIRST-FILE HEADER:
-$sourceContext
-$scopeContext
-
-Use an architecture/review-focused analysis style.
-
-Constraints:
-- Only evaluate what is present.
-- Do NOT assume missing files or systems.
-- If something appears incomplete, call it out explicitly.
-
-Focus on:
-- Structure and organization
-- Maintainability
-- Potential risks or scalability concerns
-
-''';
-      case _FirstHeaderMode.refactor:
-        return '''
-CHATGPT FIRST-FILE HEADER:
-$sourceContext
-$scopeContext
-
-Use a safe-refactor analysis style.
-
-Rules:
-- Only modify or evaluate what is shown.
-- Do NOT introduce dependencies on unseen code.
-- If a better solution requires additional context, explain what is needed instead of guessing.
-
-Goal:
-- Improve clarity, safety, and correctness
-- Keep behavior consistent unless explicitly told otherwise
-
-''';
-      case _FirstHeaderMode.ultraStrict:
-        return '''
-CHATGPT FIRST-FILE HEADER:
-$sourceContext
-$scopeContext
-
-STRICT MODE:
-
-- Use ONLY the provided content.
-- ZERO assumptions about missing files or behavior.
-- If anything necessary is unclear or missing, stop and list what is needed.
-- If the question cannot be fully answered from the provided content, respond with "Insufficient context" and explain why.
-
-Do not speculate.
-Do not infer unseen implementations.
-
-''';
-    }
-  }
-
-  Future<String> _buildSingleFileSection(
-      _SelectedFile f, {
-        required bool includeFirstHeader,
-        required int totalFiles,
-        required bool isChunkedOutput,
-      }) async {
-    await _log(
-      '_buildSingleFileSection start',
-      error:
-      'path=${f.path}, includeFirstHeader=$includeFirstHeader, isChunkedOutput=$isChunkedOutput',
-    );
-
-    final buffer = StringBuffer();
-
-    if (includeFirstHeader) {
-      buffer.write(_buildFirstFileHeader(
-        totalFiles: totalFiles,
-        isChunkedOutput: isChunkedOutput,
-      ));
-    }
-
-    buffer.writeln('===== ${f.path} =====');
-
-    if (!_safeFileExists(f.path)) {
-      buffer.writeln('[Missing file: ${f.path}]');
-      await _log('_buildSingleFileSection missing file: ${f.path}');
-      return buffer.toString();
-    }
-
-    try {
-      final text = await _readFileAsTextSmart(f);
-      buffer.writeln(text);
-      await _log(
-        '_buildSingleFileSection complete',
-        error: 'path=${f.path}, chars=${text.length}',
-      );
-    } catch (e, st) {
-      await _log(
-        '_buildSingleFileSection failed reading file',
-        error: e,
-        stack: st,
-      );
-      buffer.writeln('[Failed to read ${f.path}: $e]');
-    }
-
-    return buffer.toString();
-  }
-
-  Future<String> _buildClipboardText() async {
-    await _log('_buildClipboardText start');
-    final buffer = StringBuffer();
-    final totalFiles = _files.length;
-
-    for (var i = 0; i < _files.length; i++) {
-      await _log('_buildClipboardText section ${i + 1}/$totalFiles');
-
-      final section = await _buildSingleFileSection(
-        _files[i],
-        includeFirstHeader: i == 0,
-        totalFiles: totalFiles,
-        isChunkedOutput: false,
-      );
-      buffer.write(section);
-
-      if (i != _files.length - 1) {
-        buffer.writeln();
-        buffer.writeln();
-      }
-    }
-
-    await _log('_buildClipboardText complete');
-    return buffer.toString();
-  }
-
-  Future<List<_ChunkPlan>> _buildChunkPlans() async {
-    await _log('_buildChunkPlans start');
-
-    final chunkSize = _chunkSize;
-    await _saveChunkSize(chunkSize);
-
-    final sections = <_BuiltSection>[];
-    final totalFiles = _files.length;
-
-    await _log(
-      '_buildChunkPlans config',
-      error: 'chunkSize=$chunkSize, totalFiles=$totalFiles',
-    );
-
-    for (var i = 0; i < _files.length; i++) {
-      final f = _files[i];
-      await _log(
-        '_buildChunkPlans building section ${i + 1}/$totalFiles',
-        error: f.path,
-      );
-
-      final text = await _buildSingleFileSection(
-        f,
-        includeFirstHeader: i == 0,
-        totalFiles: totalFiles,
-        isChunkedOutput: true,
-      );
-      sections.add(_BuiltSection(file: f, text: text));
-    }
-
-    final chunks = <_ChunkPlan>[];
-    var currentSections = <_BuiltSection>[];
-    var currentLength = 0;
-
-    for (final section in sections) {
-      final separatorLength = currentSections.isEmpty ? 0 : 2;
-      final sectionLength = section.text.length;
-      final projectedLength = currentLength + separatorLength + sectionLength;
-
-      if (currentSections.isNotEmpty && projectedLength > chunkSize) {
-        chunks.add(
-          _ChunkPlan(sections: List<_BuiltSection>.from(currentSections)),
-        );
-        currentSections = [section];
-        currentLength = sectionLength;
-        continue;
-      }
-
-      if (currentSections.isEmpty) {
-        currentSections.add(section);
-        currentLength = sectionLength;
-      } else {
-        currentSections.add(section);
-        currentLength = projectedLength;
-      }
-    }
-
-    if (currentSections.isNotEmpty) {
-      chunks.add(_ChunkPlan(sections: List<_BuiltSection>.from(currentSections)));
-    }
-
-    await _log('_buildChunkPlans complete: chunkCount=${chunks.length}');
-    return chunks;
   }
 
   String _buildChunkPreamble({
@@ -963,9 +1014,9 @@ CHATGPT INPUT INSTRUCTIONS:
     buffer.writeln('===== CHUNK ${chunkIndex + 1}/$totalChunks =====');
     buffer.writeln();
 
-    for (var i = 0; i < chunk.sections.length; i++) {
-      buffer.write(chunk.sections[i].text);
-      if (i != chunk.sections.length - 1) {
+    for (var i = 0; i < chunk.sectionTexts.length; i++) {
+      buffer.write(chunk.sectionTexts[i]);
+      if (i != chunk.sectionTexts.length - 1) {
         buffer.writeln();
         buffer.writeln();
       }
@@ -979,12 +1030,36 @@ CHATGPT INPUT INSTRUCTIONS:
 
     if (_files.isEmpty) return;
 
+    final serial = ++_operationSerial;
+
     try {
-      final text = await _buildClipboardText();
+      if (mounted) {
+        setState(() {
+          _isChunking = true;
+          _chunkOperationStatus = 'Preparing clipboard text...';
+        });
+      }
+
+      final result = await compute(
+        _buildClipboardWorker,
+        <String, dynamic>{
+          'files': _fileSnapshot(),
+          'firstHeaderMode': _firstHeaderMode.prefsValue,
+        },
+      );
+
+      if (!mounted || _isStaleOperation(serial)) {
+        await _log('_copyToClipboard discarded stale result');
+        return;
+      }
+
+      final text = result['text'] as String? ?? '';
+
       await _log('_copyToClipboard clipboard set start: chars=${text.length}');
       await Clipboard.setData(ClipboardData(text: text));
 
-      if (!mounted) return;
+      if (!mounted || _isStaleOperation(serial)) return;
+
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Copied ${_files.length} file(s) to clipboard'),
@@ -992,10 +1067,26 @@ CHATGPT INPUT INSTRUCTIONS:
         ),
       );
 
+      setState(() {
+        _chunkOperationStatus = _chunksDirty
+            ? 'Chunks invalidated; will rebuild on copy'
+            : _lastBuiltChunks.isEmpty
+            ? null
+            : _lastBuiltChunks.length == 1
+            ? 'Everything fits in one copy'
+            : 'Chunks ready: ${_lastBuiltChunks.length}';
+      });
+
       await _log('_copyToClipboard complete');
     } catch (e, st) {
       await _log('_copyToClipboard failed', error: e, stack: st);
       _showSnackBar('Failed to copy files: $e');
+    } finally {
+      if (mounted && !_isStaleOperation(serial)) {
+        setState(() {
+          _isChunking = false;
+        });
+      }
     }
   }
 
@@ -1012,21 +1103,74 @@ CHATGPT INPUT INSTRUCTIONS:
       return;
     }
 
-    setState(() => _isChunking = true);
+    final serial = ++_operationSerial;
+
+    if (mounted) {
+      setState(() {
+        _isChunking = true;
+        _chunkOperationStatus = 'Rebuilding chunks...';
+      });
+    } else {
+      _isChunking = true;
+      _chunkOperationStatus = 'Rebuilding chunks...';
+    }
+
     try {
-      final chunks = await _buildChunkPlans();
-      if (!mounted) return;
+      await _saveChunkSize(_chunkSize);
+
+      final result = await compute(
+        _buildChunksWorker,
+        <String, dynamic>{
+          'files': _fileSnapshot(),
+          'chunkSize': _chunkSize,
+          'firstHeaderMode': _firstHeaderMode.prefsValue,
+        },
+      );
+
+      if (!mounted || _isStaleOperation(serial)) {
+        await _log('_ensureChunksBuilt discarded stale result');
+        return;
+      }
+
+      final rawChunks =
+      List<Map<String, dynamic>>.from(result['chunks'] as List? ?? const []);
+
+      final chunks = rawChunks
+          .map(
+            (raw) => _ChunkPlan(
+          sectionTexts:
+          List<String>.from(raw['sections'] as List? ?? const []),
+          totalCharsOverride: raw['totalChars'] as int? ?? 0,
+        ),
+      )
+          .toList(growable: false);
+
       setState(() {
         _lastBuiltChunks = chunks;
         _chunksDirty = false;
+        _chunkOperationStatus = chunks.length == 1
+            ? 'Everything fits in one copy'
+            : 'Chunks ready: ${chunks.length}';
       });
+
       await _log('_ensureChunksBuilt complete: chunkCount=${chunks.length}');
     } catch (e, st) {
       await _log('_ensureChunksBuilt failed', error: e, stack: st);
       _showSnackBar('Failed to build chunks: $e');
+      if (mounted && !_isStaleOperation(serial)) {
+        setState(() {
+          _chunksDirty = true;
+          _chunkOperationStatus =
+          'Chunk build failed; will rebuild on next copy attempt';
+        });
+      }
     } finally {
-      if (mounted) {
-        setState(() => _isChunking = false);
+      if (mounted && !_isStaleOperation(serial)) {
+        setState(() {
+          _isChunking = false;
+        });
+      } else {
+        _isChunking = false;
       }
       await _log('_ensureChunksBuilt finally: isChunking=false');
     }
@@ -1058,9 +1202,8 @@ CHATGPT INPUT INSTRUCTIONS:
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(
-            'Copied chunk ${chunkIndex + 1} of ${_lastBuiltChunks.length}',
-          ),
+          content:
+          Text('Copied chunk ${chunkIndex + 1} of ${_lastBuiltChunks.length}'),
           duration: const Duration(seconds: 2),
         ),
       );
@@ -1095,7 +1238,7 @@ CHATGPT INPUT INSTRUCTIONS:
               itemBuilder: (context, index) {
                 final chunk = _lastBuiltChunks[index];
                 final charCount = chunk.totalChars;
-                final fileCount = chunk.sections.length;
+                final fileCount = chunk.sectionTexts.length;
                 final isFinalChunk = index == _lastBuiltChunks.length - 1;
 
                 return ListTile(
@@ -1136,14 +1279,15 @@ CHATGPT INPUT INSTRUCTIONS:
     final chunkStatus = _files.isEmpty
         ? 'No files selected'
         : _isChunking
-        ? 'Rebuilding chunks...'
-        : _chunksDirty
-        ? 'Chunks invalidated; will rebuild on copy'
-        : _lastBuiltChunks.isEmpty
-        ? 'Chunks not built yet'
-        : _lastBuiltChunks.length == 1
-        ? 'Everything fits in one copy'
-        : 'Chunks ready: ${_lastBuiltChunks.length}';
+        ? (_chunkOperationStatus ?? 'Working...')
+        : _chunkOperationStatus ??
+        (_chunksDirty
+            ? 'Chunks invalidated; will rebuild on copy'
+            : _lastBuiltChunks.isEmpty
+            ? 'Chunks not built yet'
+            : _lastBuiltChunks.length == 1
+            ? 'Everything fits in one copy'
+            : 'Chunks ready: ${_lastBuiltChunks.length}');
 
     return Scaffold(
       appBar: AppBar(
@@ -1174,7 +1318,7 @@ CHATGPT INPUT INSTRUCTIONS:
               onFirstHeaderModeChanged: _onFirstHeaderModeChanged,
               onPickFiles: _isLoading ? null : _pickFiles,
               onPickFolder: _isLoading ? null : _pickFolder,
-              onCopy: _files.isEmpty ? null : _copyToClipboard,
+              onCopy: (_files.isEmpty || _isChunking) ? null : _copyToClipboard,
               onOpenCopyChunkMenu:
               (_files.isEmpty || _isChunking || !_needsChunking)
                   ? null
@@ -1329,7 +1473,8 @@ class _TopBar extends StatelessWidget {
                   ),
                 ),
                 ConstrainedBox(
-                  constraints: const BoxConstraints(minWidth: 240, maxWidth: 700),
+                  constraints:
+                  const BoxConstraints(minWidth: 240, maxWidth: 700),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -1491,31 +1636,14 @@ class _SelectedFile {
   final String name;
 }
 
-class _BuiltSection {
-  _BuiltSection({
-    required this.file,
-    required this.text,
-  });
-
-  final _SelectedFile file;
-  final String text;
-}
-
 class _ChunkPlan {
   _ChunkPlan({
-    required this.sections,
+    required this.sectionTexts,
+    required this.totalCharsOverride,
   });
 
-  final List<_BuiltSection> sections;
+  final List<String> sectionTexts;
+  final int totalCharsOverride;
 
-  int get totalChars {
-    var total = 0;
-    for (var i = 0; i < sections.length; i++) {
-      total += sections[i].text.length;
-      if (i != sections.length - 1) {
-        total += 2;
-      }
-    }
-    return total;
-  }
+  int get totalChars => totalCharsOverride;
 }
