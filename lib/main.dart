@@ -10,11 +10,22 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 const Set<String> _workerIgnoredDirectoryNames = {
-  'node_modules',
   '.dart_tool',
-  'build',
-  '.git',
+  '.firebase',
   '.idea',
+  'android',
+  'build',
+  'google_fonts',
+  'icons',
+  'installer_out',
+  'ios',
+  'linux',
+  'macos',
+  'node_modules',
+  'test',
+  'web',
+  'windows',
+  '.git',
   'coverage',
   'Pods',
   '.symlinks',
@@ -23,6 +34,31 @@ const Set<String> _workerIgnoredDirectoryNames = {
   '.nuxt',
   'dist',
   'out',
+};
+
+const Set<String> _workerIgnoredFileNames = {
+  '.firebaserc',
+  '.flutter-plugins-dependencies',
+  '.gitignore',
+  '.metadata',
+  'analysis_options.yaml',
+  'database.rules.json',
+  'deploy_market.ps1',
+  'deploy.ps1',
+  'firebase.json',
+  'firestore.indexes.json',
+  'firestore.rules',
+  'package.json',
+  'package-lock.json',
+  'pubspec.lock',
+  'pubspec.yaml',
+  'raid_builder_market.iml',
+  'README.md',
+  'storage.rules',
+  'files_to_text.iml',
+  'inno_script.iss',
+  '.eslintrc.js',
+  'firebase_options.dart'
 };
 
 Future<List<File>> _logTargets() async {
@@ -136,6 +172,15 @@ void main() {
 
 String _workerNormalizePath(String path) => path.replaceAll('\\', '/');
 
+String _workerFileNameFromPath(String path) {
+  final normalized = _workerNormalizePath(path);
+  final index = normalized.lastIndexOf('/');
+  if (index == -1 || index == normalized.length - 1) {
+    return normalized;
+  }
+  return normalized.substring(index + 1);
+}
+
 bool _workerShouldIgnorePath(String path) {
   final normalized = _workerNormalizePath(path);
   final segments = normalized.split('/');
@@ -144,6 +189,12 @@ bool _workerShouldIgnorePath(String path) {
       return true;
     }
   }
+
+  final fileName = _workerFileNameFromPath(path);
+  if (_workerIgnoredFileNames.contains(fileName)) {
+    return true;
+  }
+
   return false;
 }
 
@@ -434,58 +485,27 @@ Future<Map<String, dynamic>> _buildClipboardWorker(
   };
 }
 
-Future<Map<String, dynamic>> _buildChunksWorker(
+Future<Map<String, dynamic>> _estimateSingleFileSectionWorker(
     Map<String, dynamic> args,
     ) async {
-  final files = List<Map<String, dynamic>>.from(args['files'] as List);
-  final chunkSize = args['chunkSize'] as int;
+  final path = args['path'] as String;
+  final name = args['name'] as String;
+  final includeFirstHeader = args['includeFirstHeader'] as bool? ?? false;
+  final totalFiles = args['totalFiles'] as int? ?? 1;
+  final isChunkedOutput = args['isChunkedOutput'] as bool? ?? true;
   final firstHeaderMode = args['firstHeaderMode'] as String? ?? 'strictContext';
 
-  final totalFiles = files.length;
-  final chunks = <Map<String, dynamic>>[];
-  var currentSections = <String>[];
-  var currentLength = 0;
-
-  for (var i = 0; i < files.length; i++) {
-    final f = files[i];
-    final text = await _workerBuildSingleFileSection(
-      path: f['path'] as String,
-      name: f['name'] as String,
-      includeFirstHeader: i == 0,
-      totalFiles: totalFiles,
-      isChunkedOutput: true,
-      firstHeaderMode: firstHeaderMode,
-    );
-
-    final separatorLength = currentSections.isEmpty ? 0 : 2;
-    final sectionLength = text.length;
-    final projectedLength = currentLength + separatorLength + sectionLength;
-
-    if (currentSections.isNotEmpty && projectedLength > chunkSize) {
-      chunks.add({
-        'sections': List<String>.from(currentSections),
-        'totalChars': currentLength,
-      });
-      currentSections = [text];
-      currentLength = sectionLength;
-    } else if (currentSections.isEmpty) {
-      currentSections.add(text);
-      currentLength = sectionLength;
-    } else {
-      currentSections.add(text);
-      currentLength = projectedLength;
-    }
-  }
-
-  if (currentSections.isNotEmpty) {
-    chunks.add({
-      'sections': List<String>.from(currentSections),
-      'totalChars': currentLength,
-    });
-  }
+  final section = await _workerBuildSingleFileSection(
+    path: path,
+    name: name,
+    includeFirstHeader: includeFirstHeader,
+    totalFiles: totalFiles,
+    isChunkedOutput: isChunkedOutput,
+    firstHeaderMode: firstHeaderMode,
+  );
 
   return {
-    'chunks': chunks,
+    'length': section.length,
   };
 }
 
@@ -677,6 +697,12 @@ class _FilesToTextPageState extends State<FilesToTextPage>
         return true;
       }
     }
+
+    final fileName = _safeFileName(path);
+    if (_workerIgnoredFileNames.contains(fileName)) {
+      return true;
+    }
+
     return false;
   }
 
@@ -1061,11 +1087,11 @@ CHATGPT INPUT INSTRUCTIONS:
 ''';
   }
 
-  String _renderChunkText({
+  Future<String> _renderChunkText({
     required _ChunkPlan chunk,
     required int chunkIndex,
     required int totalChunks,
-  }) {
+  }) async {
     final buffer = StringBuffer();
     buffer.write(_buildChunkPreamble(
       chunkIndex: chunkIndex,
@@ -1075,9 +1101,20 @@ CHATGPT INPUT INSTRUCTIONS:
     buffer.writeln('===== CHUNK ${chunkIndex + 1}/$totalChunks =====');
     buffer.writeln();
 
-    for (var i = 0; i < chunk.sectionTexts.length; i++) {
-      buffer.write(chunk.sectionTexts[i]);
-      if (i != chunk.sectionTexts.length - 1) {
+    for (var i = 0; i < chunk.files.length; i++) {
+      final file = chunk.files[i];
+      final section = await _workerBuildSingleFileSection(
+        path: file.path,
+        name: file.name,
+        includeFirstHeader: chunk.startsWithFirstFile && i == 0,
+        totalFiles: _files.length,
+        isChunkedOutput: true,
+        firstHeaderMode: _firstHeaderMode.prefsValue,
+      );
+
+      buffer.write(section);
+
+      if (i != chunk.files.length - 1) {
         buffer.writeln();
         buffer.writeln();
       }
@@ -1151,6 +1188,26 @@ CHATGPT INPUT INSTRUCTIONS:
     }
   }
 
+  Future<int> _estimateSectionLengthForChunking({
+    required _SelectedFile file,
+    required bool includeFirstHeader,
+    required int totalFiles,
+  }) async {
+    final result = await compute(
+      _estimateSingleFileSectionWorker,
+      <String, dynamic>{
+        'path': file.path,
+        'name': file.name,
+        'includeFirstHeader': includeFirstHeader,
+        'totalFiles': totalFiles,
+        'isChunkedOutput': true,
+        'firstHeaderMode': _firstHeaderMode.prefsValue,
+      },
+    );
+
+    return result['length'] as int? ?? 0;
+  }
+
   Future<void> _ensureChunksBuilt() async {
     await _log(
       '_ensureChunksBuilt start',
@@ -1179,32 +1236,67 @@ CHATGPT INPUT INSTRUCTIONS:
     try {
       await _saveChunkSize(_chunkSize);
 
-      final result = await compute(
-        _buildChunksWorker,
-        <String, dynamic>{
-          'files': _fileSnapshot(),
-          'chunkSize': _chunkSize,
-          'firstHeaderMode': _firstHeaderMode.prefsValue,
-        },
-      );
+      final totalFiles = _files.length;
+      final chunks = <_ChunkPlan>[];
+      var currentFiles = <_SelectedFile>[];
+      var currentEstimatedChars = 0;
+      var currentStartsWithFirstFile = false;
+
+      for (var i = 0; i < _files.length; i++) {
+        if (_isStaleOperation(serial)) {
+          await _log('_ensureChunksBuilt aborted as stale during estimate loop');
+          return;
+        }
+
+        final file = _files[i];
+        final includeFirstHeader = i == 0;
+
+        final estimatedSectionLength = await _estimateSectionLengthForChunking(
+          file: file,
+          includeFirstHeader: includeFirstHeader,
+          totalFiles: totalFiles,
+        );
+
+        final separatorLength = currentFiles.isEmpty ? 0 : 2;
+        final projectedLength =
+            currentEstimatedChars + separatorLength + estimatedSectionLength;
+
+        if (currentFiles.isNotEmpty && projectedLength > _chunkSize) {
+          chunks.add(
+            _ChunkPlan(
+              files: List<_SelectedFile>.from(currentFiles),
+              totalCharsOverride: currentEstimatedChars,
+              startsWithFirstFile: currentStartsWithFirstFile,
+            ),
+          );
+
+          currentFiles = <_SelectedFile>[file];
+          currentEstimatedChars = estimatedSectionLength;
+          currentStartsWithFirstFile = includeFirstHeader;
+        } else if (currentFiles.isEmpty) {
+          currentFiles.add(file);
+          currentEstimatedChars = estimatedSectionLength;
+          currentStartsWithFirstFile = includeFirstHeader;
+        } else {
+          currentFiles.add(file);
+          currentEstimatedChars = projectedLength;
+        }
+      }
+
+      if (currentFiles.isNotEmpty) {
+        chunks.add(
+          _ChunkPlan(
+            files: List<_SelectedFile>.from(currentFiles),
+            totalCharsOverride: currentEstimatedChars,
+            startsWithFirstFile: currentStartsWithFirstFile,
+          ),
+        );
+      }
 
       if (!mounted || _isStaleOperation(serial)) {
         await _log('_ensureChunksBuilt discarded stale result');
         return;
       }
-
-      final rawChunks =
-      List<Map<String, dynamic>>.from(result['chunks'] as List? ?? const []);
-
-      final chunks = rawChunks
-          .map(
-            (raw) => _ChunkPlan(
-          sectionTexts:
-          List<String>.from(raw['sections'] as List? ?? const []),
-          totalCharsOverride: raw['totalChars'] as int? ?? 0,
-        ),
-      )
-          .toList(growable: false);
 
       setState(() {
         _lastBuiltChunks = chunks;
@@ -1248,7 +1340,7 @@ CHATGPT INPUT INSTRUCTIONS:
       if (chunkIndex < 0 || chunkIndex >= _lastBuiltChunks.length) return;
 
       final chunk = _lastBuiltChunks[chunkIndex];
-      final text = _renderChunkText(
+      final text = await _renderChunkText(
         chunk: chunk,
         chunkIndex: chunkIndex,
         totalChunks: _lastBuiltChunks.length,
@@ -1299,7 +1391,7 @@ CHATGPT INPUT INSTRUCTIONS:
               itemBuilder: (context, index) {
                 final chunk = _lastBuiltChunks[index];
                 final charCount = chunk.totalChars;
-                final fileCount = chunk.sectionTexts.length;
+                final fileCount = chunk.files.length;
                 final isFinalChunk = index == _lastBuiltChunks.length - 1;
 
                 return ListTile(
@@ -1311,7 +1403,7 @@ CHATGPT INPUT INSTRUCTIONS:
                         ? 'Chunk ${index + 1} of ${_lastBuiltChunks.length} (final)'
                         : 'Chunk ${index + 1} of ${_lastBuiltChunks.length}',
                   ),
-                  subtitle: Text('$fileCount file(s) • $charCount chars'),
+                  subtitle: Text('$fileCount file(s) • ~$charCount chars'),
                   onTap: () async {
                     await _log('_openCopyChunkMenu tapped chunk index=$index');
                     Navigator.of(context).pop();
@@ -1699,12 +1791,14 @@ class _SelectedFile {
 
 class _ChunkPlan {
   _ChunkPlan({
-    required this.sectionTexts,
+    required this.files,
     required this.totalCharsOverride,
+    required this.startsWithFirstFile,
   });
 
-  final List<String> sectionTexts;
+  final List<_SelectedFile> files;
   final int totalCharsOverride;
+  final bool startsWithFirstFile;
 
   int get totalChars => totalCharsOverride;
 }
