@@ -58,7 +58,7 @@ const Set<String> _workerIgnoredFileNames = {
   'files_to_text.iml',
   'inno_script.iss',
   '.eslintrc.js',
-  'firebase_options.dart'
+  'firebase_options.dart',
 };
 
 Future<List<File>> _logTargets() async {
@@ -88,11 +88,7 @@ Future<List<File>> _logTargets() async {
   return uniqueFiles;
 }
 
-Future<void> appendCrashLog(
-    String message, {
-      StackTrace? stack,
-      Object? error,
-    }) async {
+Future<void> appendCrashLog(String message, {StackTrace? stack, Object? error}) async {
   try {
     final targets = await _logTargets();
     final buffer = StringBuffer()
@@ -114,11 +110,7 @@ Future<void> appendCrashLog(
 
     for (final file in targets) {
       try {
-        await file.writeAsString(
-          text,
-          mode: FileMode.append,
-          flush: true,
-        );
+        await file.writeAsString(text, mode: FileMode.append, flush: true);
       } catch (_) {
         // Ignore per-target logging failures.
       }
@@ -133,41 +125,26 @@ Future<void> appendCrashLog(
 }
 
 void main() {
-  runZonedGuarded(() {
-    WidgetsFlutterBinding.ensureInitialized();
+  runZonedGuarded(
+    () {
+      WidgetsFlutterBinding.ensureInitialized();
 
-    FlutterError.onError = (FlutterErrorDetails details) {
-      FlutterError.presentError(details);
-      unawaited(
-        appendCrashLog(
-          'FlutterError caught',
-          error: details.exception,
-          stack: details.stack,
-        ),
-      );
-    };
+      FlutterError.onError = (FlutterErrorDetails details) {
+        FlutterError.presentError(details);
+        unawaited(appendCrashLog('FlutterError caught', error: details.exception, stack: details.stack));
+      };
 
-    PlatformDispatcher.instance.onError = (error, stack) {
-      unawaited(
-        appendCrashLog(
-          'PlatformDispatcher.onError caught',
-          error: error,
-          stack: stack,
-        ),
-      );
-      return true;
-    };
+      PlatformDispatcher.instance.onError = (error, stack) {
+        unawaited(appendCrashLog('PlatformDispatcher.onError caught', error: error, stack: stack));
+        return true;
+      };
 
-    runApp(const FilesToTextApp());
-  }, (error, stack) {
-    unawaited(
-      appendCrashLog(
-        'runZonedGuarded caught',
-        error: error,
-        stack: stack,
-      ),
-    );
-  });
+      runApp(const FilesToTextApp());
+    },
+    (error, stack) {
+      unawaited(appendCrashLog('runZonedGuarded caught', error: error, stack: stack));
+    },
+  );
 }
 
 String _workerNormalizePath(String path) => path.replaceAll('\\', '/');
@@ -341,10 +318,7 @@ Reference specific parts of the content when possible.
   }
 }
 
-Future<String> _workerReadFileAsText({
-  required String path,
-  required String name,
-}) async {
+Future<String> _workerReadFileAsText({required String path, required String name}) async {
   final file = File(path);
   final ext = _workerExtLower(name);
   final bytes = await file.readAsBytes();
@@ -453,9 +427,7 @@ Map<String, dynamic> _listNestedFilesWorker(Map<String, dynamic> args) {
   };
 }
 
-Future<Map<String, dynamic>> _buildClipboardWorker(
-    Map<String, dynamic> args,
-    ) async {
+Future<Map<String, dynamic>> _buildClipboardWorker(Map<String, dynamic> args) async {
   final files = List<Map<String, dynamic>>.from(args['files'] as List);
   final firstHeaderMode = args['firstHeaderMode'] as String? ?? 'strictContext';
 
@@ -480,14 +452,10 @@ Future<Map<String, dynamic>> _buildClipboardWorker(
     }
   }
 
-  return {
-    'text': buffer.toString(),
-  };
+  return {'text': buffer.toString()};
 }
 
-Future<Map<String, dynamic>> _estimateSingleFileSectionWorker(
-    Map<String, dynamic> args,
-    ) async {
+Future<Map<String, dynamic>> _estimateSingleFileSectionWorker(Map<String, dynamic> args) async {
   final path = args['path'] as String;
   final name = args['name'] as String;
   final includeFirstHeader = args['includeFirstHeader'] as bool? ?? false;
@@ -504,9 +472,7 @@ Future<Map<String, dynamic>> _estimateSingleFileSectionWorker(
     firstHeaderMode: firstHeaderMode,
   );
 
-  return {
-    'length': section.length,
-  };
+  return {'length': section.length};
 }
 
 class FilesToTextApp extends StatelessWidget {
@@ -517,24 +483,13 @@ class FilesToTextApp extends StatelessWidget {
     return MaterialApp(
       title: 'Files to Text',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
-        useMaterial3: true,
-      ),
+      theme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue), useMaterial3: true),
       home: const FilesToTextPage(),
     );
   }
 }
 
-enum _FirstHeaderMode {
-  none,
-  lightweight,
-  strictContext,
-  debugging,
-  architecture,
-  refactor,
-  ultraStrict,
-}
+enum _FirstHeaderMode { none, lightweight, strictContext, debugging, architecture, refactor, ultraStrict }
 
 extension _FirstHeaderModeX on _FirstHeaderMode {
   String get prefsValue => name;
@@ -573,8 +528,7 @@ class FilesToTextPage extends StatefulWidget {
   State<FilesToTextPage> createState() => _FilesToTextPageState();
 }
 
-class _FilesToTextPageState extends State<FilesToTextPage>
-    with WidgetsBindingObserver {
+class _FilesToTextPageState extends State<FilesToTextPage> with WidgetsBindingObserver {
   static const String _prefsLastDirKey = 'last_dir';
   static const String _prefsChunkSizeKey = 'chunk_size_chars';
   static const String _prefsFirstHeaderModeKey = 'first_header_mode';
@@ -594,15 +548,10 @@ class _FilesToTextPageState extends State<FilesToTextPage>
 
   _FirstHeaderMode _firstHeaderMode = _FirstHeaderMode.strictContext;
 
-  bool get _needsChunking =>
-      _lastBuiltChunks.length > 1 || (_chunksDirty && _files.isNotEmpty);
+  bool get _needsChunking => _lastBuiltChunks.length > 1 || (_chunksDirty && _files.isNotEmpty);
 
   Future<void> _log(String message, {Object? error, StackTrace? stack}) {
-    return appendCrashLog(
-      message,
-      error: error,
-      stack: stack,
-    );
+    return appendCrashLog(message, error: error, stack: stack);
   }
 
   @override
@@ -637,12 +586,7 @@ class _FilesToTextPageState extends State<FilesToTextPage>
 
     if (!mounted) return;
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        duration: const Duration(seconds: 3),
-      ),
-    );
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message), duration: const Duration(seconds: 3)));
   }
 
   bool _safeFileExists(String path) {
@@ -707,12 +651,7 @@ class _FilesToTextPageState extends State<FilesToTextPage>
   }
 
   List<Map<String, dynamic>> _fileSnapshot() {
-    return _files
-        .map((f) => <String, dynamic>{
-      'path': f.path,
-      'name': f.name,
-    })
-        .toList(growable: false);
+    return _files.map((f) => <String, dynamic>{'path': f.path, 'name': f.name}).toList(growable: false);
   }
 
   Future<void> _loadPrefs() async {
@@ -726,8 +665,7 @@ class _FilesToTextPageState extends State<FilesToTextPage>
 
       await _log(
         '_loadPrefs loaded raw values',
-        error:
-        'dir=$dir, chunkSize=$chunkSize, firstHeaderModeValue=$firstHeaderModeValue',
+        error: 'dir=$dir, chunkSize=$chunkSize, firstHeaderModeValue=$firstHeaderModeValue',
       );
 
       if (!mounted) return;
@@ -805,8 +743,7 @@ class _FilesToTextPageState extends State<FilesToTextPage>
     _bumpOperationSerial();
     _lastBuiltChunks = [];
     _chunksDirty = _files.isNotEmpty;
-    _chunkOperationStatus =
-    _files.isNotEmpty ? 'Chunks invalidated; will rebuild on copy' : null;
+    _chunkOperationStatus = _files.isNotEmpty ? 'Chunks invalidated; will rebuild on copy' : null;
   }
 
   Future<void> _pickFiles() async {
@@ -824,8 +761,7 @@ class _FilesToTextPageState extends State<FilesToTextPage>
 
       await _log(
         '_pickFiles picker returned',
-        error:
-        result == null ? 'result=null' : 'fileCount=${result.files.length}',
+        error: result == null ? 'result=null' : 'fileCount=${result.files.length}',
       );
 
       if (result == null || result.files.isEmpty) return;
@@ -839,11 +775,7 @@ class _FilesToTextPageState extends State<FilesToTextPage>
           await _log('_pickFiles saving parent dir: $parent');
           await _saveLastDir(parent);
         } catch (e, st) {
-          await _log(
-            '_pickFiles failed resolving parent path',
-            error: e,
-            stack: st,
-          );
+          await _log('_pickFiles failed resolving parent path', error: e, stack: st);
         }
       }
 
@@ -868,19 +800,14 @@ class _FilesToTextPageState extends State<FilesToTextPage>
   Future<List<String>> _listNestedFiles(String selectedDir) async {
     await _log('_listNestedFiles start: $selectedDir');
 
-    final result = await compute(
-      _listNestedFilesWorker,
-      <String, dynamic>{
-        'selectedDir': selectedDir,
-      },
-    );
+    final result = await compute(_listNestedFilesWorker, <String, dynamic>{'selectedDir': selectedDir});
 
     final paths = List<String>.from(result['paths'] as List? ?? const []);
 
     await _log(
       '_listNestedFiles complete',
       error:
-      'paths=${paths.length}, visitedDirs=${result['visitedDirs']}, visitedEntities=${result['visitedEntities']}, skippedIgnored=${result['skippedIgnored']}, skippedUnreadableDirs=${result['skippedUnreadableDirs']}, skippedUnreadableEntities=${result['skippedUnreadableEntities']}',
+          'paths=${paths.length}, visitedDirs=${result['visitedDirs']}, visitedEntities=${result['visitedEntities']}, skippedIgnored=${result['skippedIgnored']}, skippedUnreadableDirs=${result['skippedUnreadableDirs']}, skippedUnreadableEntities=${result['skippedUnreadableEntities']}',
     );
 
     return paths;
@@ -902,9 +829,7 @@ class _FilesToTextPageState extends State<FilesToTextPage>
           initialDirectory: lastDir,
         );
       } else {
-        selectedDir = await FilePicker.platform.getDirectoryPath(
-          dialogTitle: 'Select folder to include recursively',
-        );
+        selectedDir = await FilePicker.platform.getDirectoryPath(dialogTitle: 'Select folder to include recursively');
       }
 
       await _log('_pickFolder picker returned: $selectedDir');
@@ -954,7 +879,7 @@ class _FilesToTextPageState extends State<FilesToTextPage>
           await _log(
             '_addPaths progress',
             error:
-            'checked=$checked, loaded=${loaded.length}, skippedExisting=$skippedExisting, skippedMissing=$skippedMissing, skippedIgnored=$skippedIgnored',
+                'checked=$checked, loaded=${loaded.length}, skippedExisting=$skippedExisting, skippedMissing=$skippedMissing, skippedIgnored=$skippedIgnored',
           );
         }
 
@@ -972,19 +897,14 @@ class _FilesToTextPageState extends State<FilesToTextPage>
           continue;
         }
 
-        loaded.add(
-          _SelectedFile(
-            path: path,
-            name: _safeFileName(path),
-          ),
-        );
+        loaded.add(_SelectedFile(path: path, name: _safeFileName(path)));
         existingPaths.add(path);
       }
 
       await _log(
         '_addPaths filtering complete',
         error:
-        'checked=$checked, loaded=${loaded.length}, skippedExisting=$skippedExisting, skippedMissing=$skippedMissing, skippedIgnored=$skippedIgnored',
+            'checked=$checked, loaded=${loaded.length}, skippedExisting=$skippedExisting, skippedMissing=$skippedMissing, skippedIgnored=$skippedIgnored',
       );
 
       if (loaded.isEmpty) return;
@@ -1056,10 +976,7 @@ class _FilesToTextPageState extends State<FilesToTextPage>
     await _log('_onFirstHeaderModeChanged complete: ${mode.prefsValue}');
   }
 
-  String _buildChunkPreamble({
-    required int chunkIndex,
-    required int totalChunks,
-  }) {
+  String _buildChunkPreamble({required int chunkIndex, required int totalChunks}) {
     final isFinalChunk = chunkIndex == totalChunks - 1;
 
     if (isFinalChunk) {
@@ -1093,10 +1010,13 @@ CHATGPT INPUT INSTRUCTIONS:
     required int totalChunks,
   }) async {
     final buffer = StringBuffer();
-    buffer.write(_buildChunkPreamble(
-      chunkIndex: chunkIndex,
-      totalChunks: totalChunks,
-    ));
+    buffer.write(_buildChunkPreamble(chunkIndex: chunkIndex, totalChunks: totalChunks));
+
+    buffer.writeln('===== CHUNK ${chunkIndex + 1}/$totalChunks TOC =====');
+    for (final file in chunk.files) {
+      buffer.writeln(file.path);
+    }
+    buffer.writeln();
 
     buffer.writeln('===== CHUNK ${chunkIndex + 1}/$totalChunks =====');
     buffer.writeln();
@@ -1138,13 +1058,10 @@ CHATGPT INPUT INSTRUCTIONS:
         });
       }
 
-      final result = await compute(
-        _buildClipboardWorker,
-        <String, dynamic>{
-          'files': _fileSnapshot(),
-          'firstHeaderMode': _firstHeaderMode.prefsValue,
-        },
-      );
+      final result = await compute(_buildClipboardWorker, <String, dynamic>{
+        'files': _fileSnapshot(),
+        'firstHeaderMode': _firstHeaderMode.prefsValue,
+      });
 
       if (!mounted || _isStaleOperation(serial)) {
         await _log('_copyToClipboard discarded stale result');
@@ -1159,10 +1076,7 @@ CHATGPT INPUT INSTRUCTIONS:
       if (!mounted || _isStaleOperation(serial)) return;
 
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Copied ${_files.length} file(s) to clipboard'),
-          duration: const Duration(seconds: 2),
-        ),
+        SnackBar(content: Text('Copied ${_files.length} file(s) to clipboard'), duration: const Duration(seconds: 2)),
       );
 
       setState(() {
@@ -1193,17 +1107,14 @@ CHATGPT INPUT INSTRUCTIONS:
     required bool includeFirstHeader,
     required int totalFiles,
   }) async {
-    final result = await compute(
-      _estimateSingleFileSectionWorker,
-      <String, dynamic>{
-        'path': file.path,
-        'name': file.name,
-        'includeFirstHeader': includeFirstHeader,
-        'totalFiles': totalFiles,
-        'isChunkedOutput': true,
-        'firstHeaderMode': _firstHeaderMode.prefsValue,
-      },
-    );
+    final result = await compute(_estimateSingleFileSectionWorker, <String, dynamic>{
+      'path': file.path,
+      'name': file.name,
+      'includeFirstHeader': includeFirstHeader,
+      'totalFiles': totalFiles,
+      'isChunkedOutput': true,
+      'firstHeaderMode': _firstHeaderMode.prefsValue,
+    });
 
     return result['length'] as int? ?? 0;
   }
@@ -1211,8 +1122,7 @@ CHATGPT INPUT INSTRUCTIONS:
   Future<void> _ensureChunksBuilt() async {
     await _log(
       '_ensureChunksBuilt start',
-      error:
-      'fileCount=${_files.length}, cachedChunkCount=${_lastBuiltChunks.length}, chunksDirty=$_chunksDirty',
+      error: 'fileCount=${_files.length}, cachedChunkCount=${_lastBuiltChunks.length}, chunksDirty=$_chunksDirty',
     );
 
     if (_files.isEmpty) return;
@@ -1258,8 +1168,7 @@ CHATGPT INPUT INSTRUCTIONS:
         );
 
         final separatorLength = currentFiles.isEmpty ? 0 : 2;
-        final projectedLength =
-            currentEstimatedChars + separatorLength + estimatedSectionLength;
+        final projectedLength = currentEstimatedChars + separatorLength + estimatedSectionLength;
 
         if (currentFiles.isNotEmpty && projectedLength > _chunkSize) {
           chunks.add(
@@ -1301,9 +1210,7 @@ CHATGPT INPUT INSTRUCTIONS:
       setState(() {
         _lastBuiltChunks = chunks;
         _chunksDirty = false;
-        _chunkOperationStatus = chunks.length == 1
-            ? 'Everything fits in one copy'
-            : 'Chunks ready: ${chunks.length}';
+        _chunkOperationStatus = chunks.length == 1 ? 'Everything fits in one copy' : 'Chunks ready: ${chunks.length}';
       });
 
       await _log('_ensureChunksBuilt complete: chunkCount=${chunks.length}');
@@ -1313,8 +1220,7 @@ CHATGPT INPUT INSTRUCTIONS:
       if (mounted && !_isStaleOperation(serial)) {
         setState(() {
           _chunksDirty = true;
-          _chunkOperationStatus =
-          'Chunk build failed; will rebuild on next copy attempt';
+          _chunkOperationStatus = 'Chunk build failed; will rebuild on next copy attempt';
         });
       }
     } finally {
@@ -1340,23 +1246,15 @@ CHATGPT INPUT INSTRUCTIONS:
       if (chunkIndex < 0 || chunkIndex >= _lastBuiltChunks.length) return;
 
       final chunk = _lastBuiltChunks[chunkIndex];
-      final text = await _renderChunkText(
-        chunk: chunk,
-        chunkIndex: chunkIndex,
-        totalChunks: _lastBuiltChunks.length,
-      );
+      final text = await _renderChunkText(chunk: chunk, chunkIndex: chunkIndex, totalChunks: _lastBuiltChunks.length);
 
-      await _log(
-        '_copyChunk clipboard set start',
-        error: 'index=$chunkIndex, chars=${text.length}',
-      );
+      await _log('_copyChunk clipboard set start', error: 'index=$chunkIndex, chars=${text.length}');
       await Clipboard.setData(ClipboardData(text: text));
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content:
-          Text('Copied chunk ${chunkIndex + 1} of ${_lastBuiltChunks.length}'),
+          content: Text('Copied chunk ${chunkIndex + 1} of ${_lastBuiltChunks.length}'),
           duration: const Duration(seconds: 2),
         ),
       );
@@ -1395,9 +1293,7 @@ CHATGPT INPUT INSTRUCTIONS:
                 final isFinalChunk = index == _lastBuiltChunks.length - 1;
 
                 return ListTile(
-                  leading: Icon(
-                    isFinalChunk ? Icons.flag_outlined : Icons.content_copy,
-                  ),
+                  leading: Icon(isFinalChunk ? Icons.flag_outlined : Icons.content_copy),
                   title: Text(
                     isFinalChunk
                         ? 'Chunk ${index + 1} of ${_lastBuiltChunks.length} (final)'
@@ -1434,13 +1330,13 @@ CHATGPT INPUT INSTRUCTIONS:
         : _isChunking
         ? (_chunkOperationStatus ?? 'Working...')
         : _chunkOperationStatus ??
-        (_chunksDirty
-            ? 'Chunks invalidated; will rebuild on copy'
-            : _lastBuiltChunks.isEmpty
-            ? 'Chunks not built yet'
-            : _lastBuiltChunks.length == 1
-            ? 'Everything fits in one copy'
-            : 'Chunks ready: ${_lastBuiltChunks.length}');
+              (_chunksDirty
+                  ? 'Chunks invalidated; will rebuild on copy'
+                  : _lastBuiltChunks.isEmpty
+                  ? 'Chunks not built yet'
+                  : _lastBuiltChunks.length == 1
+                  ? 'Everything fits in one copy'
+                  : 'Chunks ready: ${_lastBuiltChunks.length}');
 
     return Scaffold(
       appBar: AppBar(
@@ -1472,22 +1368,16 @@ CHATGPT INPUT INSTRUCTIONS:
               onPickFiles: _isLoading ? null : _pickFiles,
               onPickFolder: _isLoading ? null : _pickFolder,
               onCopy: (_files.isEmpty || _isChunking) ? null : _copyToClipboard,
-              onOpenCopyChunkMenu:
-              (_files.isEmpty || _isChunking || !_needsChunking)
-                  ? null
-                  : _openCopyChunkMenu,
+              onOpenCopyChunkMenu: (_files.isEmpty || _isChunking || !_needsChunking) ? null : _openCopyChunkMenu,
             ),
             const SizedBox(height: 16),
             Expanded(
               child: _files.isEmpty
                   ? _EmptyState(
-                onPickFiles: _isLoading ? null : _pickFiles,
-                onPickFolder: _isLoading ? null : _pickFolder,
-              )
-                  : _FileList(
-                files: _files,
-                onRemoveAt: _removeFileAt,
-              ),
+                      onPickFiles: _isLoading ? null : _pickFiles,
+                      onPickFolder: _isLoading ? null : _pickFolder,
+                    )
+                  : _FileList(files: _files, onRemoveAt: _removeFileAt),
             ),
           ],
         ),
@@ -1556,11 +1446,7 @@ class _TopBar extends StatelessWidget {
                 FilledButton.icon(
                   onPressed: onPickFiles,
                   icon: isLoading
-                      ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
+                      ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
                       : const Icon(Icons.insert_drive_file_outlined),
                   label: Text(isLoading ? 'Loading…' : 'Select files'),
                 ),
@@ -1569,20 +1455,12 @@ class _TopBar extends StatelessWidget {
                   icon: const Icon(Icons.folder_open),
                   label: const Text('Select folder'),
                 ),
-                OutlinedButton.icon(
-                  onPressed: onCopy,
-                  icon: const Icon(Icons.copy),
-                  label: const Text('Copy all'),
-                ),
+                OutlinedButton.icon(onPressed: onCopy, icon: const Icon(Icons.copy), label: const Text('Copy all')),
                 if (hasChunkSource)
                   OutlinedButton.icon(
                     onPressed: onOpenCopyChunkMenu,
                     icon: isChunking
-                        ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
+                        ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
                         : const Icon(Icons.arrow_drop_down_circle_outlined),
                     label: const Text('Copy chunk'),
                   ),
@@ -1616,18 +1494,16 @@ class _TopBar extends StatelessWidget {
                       border: OutlineInputBorder(),
                       isDense: true,
                     ),
-                    items: _FirstHeaderMode.values.map((mode) {
-                      return DropdownMenuItem<_FirstHeaderMode>(
-                        value: mode,
-                        child: Text(mode.label),
-                      );
-                    }).toList(growable: false),
+                    items: _FirstHeaderMode.values
+                        .map((mode) {
+                          return DropdownMenuItem<_FirstHeaderMode>(value: mode, child: Text(mode.label));
+                        })
+                        .toList(growable: false),
                     onChanged: onFirstHeaderModeChanged,
                   ),
                 ),
                 ConstrainedBox(
-                  constraints:
-                  const BoxConstraints(minWidth: 240, maxWidth: 700),
+                  constraints: const BoxConstraints(minWidth: 240, maxWidth: 700),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -1637,9 +1513,7 @@ class _TopBar extends StatelessWidget {
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        lastDir == null
-                            ? 'Last folder: (none yet)'
-                            : 'Last folder: $lastDir',
+                        lastDir == null ? 'Last folder: (none yet)' : 'Last folder: $lastDir',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: Theme.of(context).textTheme.bodySmall,
@@ -1664,10 +1538,7 @@ class _TopBar extends StatelessWidget {
 }
 
 class _EmptyState extends StatelessWidget {
-  const _EmptyState({
-    required this.onPickFiles,
-    required this.onPickFolder,
-  });
+  const _EmptyState({required this.onPickFiles, required this.onPickFolder});
 
   final VoidCallback? onPickFiles;
   final VoidCallback? onPickFolder;
@@ -1718,10 +1589,7 @@ class _EmptyState extends StatelessWidget {
 }
 
 class _FileList extends StatelessWidget {
-  const _FileList({
-    required this.files,
-    required this.onRemoveAt,
-  });
+  const _FileList({required this.files, required this.onRemoveAt});
 
   final List<_SelectedFile> files;
   final Future<void> Function(int index) onRemoveAt;
@@ -1757,11 +1625,7 @@ class _FileList extends StatelessWidget {
 
           return ListTile(
             leading: const Icon(Icons.insert_drive_file_outlined),
-            title: Text(
-              f.path,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            ),
+            title: Text(f.path, maxLines: 2, overflow: TextOverflow.ellipsis),
             subtitle: Text(
               '${f.name}\n${exists ? "Bytes: $bytes" : "Missing file"}',
               maxLines: 3,
@@ -1780,21 +1644,14 @@ class _FileList extends StatelessWidget {
 }
 
 class _SelectedFile {
-  _SelectedFile({
-    required this.path,
-    required this.name,
-  });
+  _SelectedFile({required this.path, required this.name});
 
   final String path;
   final String name;
 }
 
 class _ChunkPlan {
-  _ChunkPlan({
-    required this.files,
-    required this.totalCharsOverride,
-    required this.startsWithFirstFile,
-  });
+  _ChunkPlan({required this.files, required this.totalCharsOverride, required this.startsWithFirstFile});
 
   final List<_SelectedFile> files;
   final int totalCharsOverride;
